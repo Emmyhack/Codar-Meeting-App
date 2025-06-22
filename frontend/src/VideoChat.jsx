@@ -105,6 +105,9 @@ const VideoChat = ({ open, onClose, roomName }) => {
 
   useEffect(() => {
     if (open) {
+      // Auto-copy meeting link to clipboard and show snackbar
+      const url = `${window.location.origin}${window.location.pathname}?room=${encodeURIComponent(roomName)}`;
+      navigator.clipboard.writeText(url).then(() => setShareSnackbar(true));
       initializeMeeting();
     }
     return () => cleanup();

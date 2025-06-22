@@ -86,6 +86,16 @@ export default function App() {
     fetchMeetings();
   }, [contractService]);
 
+  // 1. On mount, check for ?room= and open VideoChat if present
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const room = params.get('room');
+    if (room) {
+      setVideoChatRoom(room);
+      setVideoChatOpen(true);
+    }
+  }, []);
+
   async function connectWallet() {
     if (!window.ethereum) {
       setSnackbar({ 
@@ -144,6 +154,7 @@ export default function App() {
     }
   }, [contractService]);
 
+  // 2. After creating a meeting, go live immediately and show share notification
   async function handleCreateMeeting() {
     if (!meetingTitle.trim()) {
       setSnackbar({ open: true, message: "Please enter a meeting title.", severity: "warning" });
@@ -153,9 +164,12 @@ export default function App() {
     setIsLoading(true);
     try {
       const scheduledTime = Math.floor(new Date().getTime() / 1000); // current time as Unix timestamp
-      await contractService.createMeeting(meetingTitle, "A decentralized meeting", scheduledTime, false);
+      const tx = await contractService.createMeeting(meetingTitle, "A decentralized meeting", scheduledTime, false);
       setSnackbar({ open: true, message: "Meeting created successfully!", severity: "success" });
       fetchMeetingCount();
+      // Go live immediately
+      setVideoChatRoom(meetingTitle.replace(/\s+/g, '-').toLowerCase());
+      setVideoChatOpen(true);
     } catch (e) {
       setSnackbar({ open: true, message: e.message, severity: "error" });
     }
@@ -370,11 +384,11 @@ export default function App() {
             <Paper elevation={2} sx={{ p: 3, borderRadius: 3 }}>
               <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
                 <Typography variant="h5" sx={{ fontWeight: 600, color: '#1a1a1a' }}>
-                  Your Meetings
-                    </Typography>
-                  <Button
-                    variant="contained"
-                    startIcon={<AddIcon />}
+                  Start a Meeting
+                </Typography>
+                <Button
+                  variant="contained"
+                  startIcon={<AddIcon />}
                   onClick={() => setOpenDialog(true)}
                   sx={{ 
                     background: 'linear-gradient(45deg, #667eea, #764ba2)',
@@ -386,137 +400,15 @@ export default function App() {
                   }}
                 >
                   Create Meeting
-                  </Button>
+                </Button>
               </Box>
-              {/* List meetings */}
-              {isMeetingsLoading ? (
-                <Box sx={{ display: 'flex', justifyContent: 'center', mt: 4 }}>
-                  <CircularProgress />
-                </Box>
-              ) : visibleMeetings.length === 0 ? (
-                <Typography variant="body1" sx={{ color: '#888', mt: 2 }}>
-                  No meetings found. Create one to get started!
-                  </Typography>
-                ) : (
-                <Box sx={{ mt: 2 }}>
-                  {visibleMeetings.map((m, idx) => (
-                    <Card key={m[0] || idx} sx={{ mb: 2, borderRadius: 2, border: '1px solid #e2e8f0' }}>
-                      <CardContent>
-                        <Typography variant="h6" sx={{ fontWeight: 600 }}>{m[2]}</Typography>
-                        <Typography variant="body2" sx={{ color: '#666', mb: 1 }}>{m[3]}</Typography>
-                        <Typography variant="caption" sx={{ color: '#999' }}>ID: {m[0]}</Typography>
-                        <Box sx={{ display: 'flex', gap: 2, mt: 1 }}>
-                          <Button
-                            variant="outlined"
-                            size="small"
-                            onClick={() => handleJoinMeeting(m[0])}
-                            disabled={isLoading}
-                          >
-                            Join
-                          </Button>
-                          <Button
-                            variant="contained"
-                            size="small"
-                            color="primary"
-                            onClick={() => {
-                              setVideoChatRoom(m[2] || `meeting-${m[0]}`);
-                              setVideoChatOpen(true);
-                            }}
-                          >
-                            Go Live
-                          </Button>
-                          <Button
-                            variant="outlined"
-                            size="small"
-                            color="error"
-                            onClick={() => {
-                              const updated = [...hiddenMeetings, m[0]];
-                              setHiddenMeetings(updated);
-                              localStorage.setItem('hiddenMeetings', JSON.stringify(updated));
-                            }}
-                          >
-                            Hide
-                          </Button>
-                        </Box>
-                      </CardContent>
-                    </Card>
-                  ))}
-                </Box>
-              )}
-              {/* Existing meeting count card below */}
-              <Card sx={{ 
-                background: 'linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%)',
-                borderRadius: 2,
-                border: '1px solid #e2e8f0',
-                mt: 3
-              }}>
-                <CardContent>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 2 }}>
-                    <GroupIcon sx={{ color: '#667eea' }} />
-                    <Typography variant="h6" sx={{ fontWeight: 600 }}>
-                      Meetings on Chain
-                    </Typography>
-                  </Box>
-                  <Typography variant="h4" sx={{ fontWeight: 700, color: '#667eea' }}>
-                    {meetingCount}
-                  </Typography>
-                  <Typography variant="body2" sx={{ color: '#666' }}>
-                    Total meetings created
-                  </Typography>
-                  {isLoading && (
-                    <Box sx={{ mt: 2 }}>
-                      <CircularProgress size={20} />
-                    </Box>
-                  )}
-                </CardContent>
-              </Card>
+              <Typography variant="body1" sx={{ color: '#888', mt: 2 }}>
+                Create a meeting and go live instantly. Share the link with others to join you.
+              </Typography>
             </Paper>
           </Grid>
-          <Grid gridSize={4}>
-            <Paper elevation={2} sx={{ p: 3, borderRadius: 3 }}>
-              <Typography variant="h6" sx={{ fontWeight: 600, mb: 2 }}>
-                Quick Actions
-              </Typography>
-              <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                <Button
-                  variant="outlined"
-                  startIcon={<VideoCallIcon />}
-                  fullWidth
-                  sx={{ 
-                    justifyContent: 'flex-start',
-                    borderColor: '#667eea',
-                    color: '#667eea',
-                    '&:hover': {
-                      borderColor: '#5a6fd8',
-                      background: 'rgba(102, 126, 234, 0.05)'
-                    }
-                  }}
-                  onClick={() => setViewAllOpen(true)}
-                >
-                  Join Meeting
-                </Button>
-                <Button
-                  variant="outlined"
-                  startIcon={<GroupIcon />}
-                  fullWidth
-                  sx={{ 
-                    justifyContent: 'flex-start',
-                    borderColor: '#667eea',
-                    color: '#667eea',
-                    '&:hover': {
-                      borderColor: '#5a6fd8',
-                      background: 'rgba(102, 126, 234, 0.05)'
-                    }
-                  }}
-                  onClick={() => setViewAllOpen(true)}
-                >
-                  View All Meetings
-                </Button>
-              </Box>
-              </Paper>
-            </Grid>
-          </Grid>
-        </Container>
+        </Grid>
+      </Container>
 
       <Dialog 
         open={openDialog} 
@@ -569,47 +461,6 @@ export default function App() {
           >
             {isLoading ? 'Creating...' : 'Create Meeting'}
           </Button>
-        </DialogActions>
-      </Dialog>
-
-      {/* Dialog to view all meetings */}
-      <Dialog open={viewAllOpen} onClose={() => setViewAllOpen(false)} maxWidth="md" fullWidth>
-        <DialogTitle>All Meetings</DialogTitle>
-        <DialogContent>
-          {isMeetingsLoading ? (
-            <Box sx={{ display: 'flex', justifyContent: 'center', mt: 4 }}>
-              <CircularProgress />
-            </Box>
-          ) : meetings.length === 0 ? (
-            <Typography variant="body1" sx={{ color: '#888', mt: 2 }}>
-              No meetings found.
-          </Typography>
-          ) : (
-            <Box sx={{ mt: 2 }}>
-              {meetings.map((m, idx) => (
-                <Card key={m[0] || idx} sx={{ mb: 2, borderRadius: 2, border: '1px solid #e2e8f0' }}>
-                  <CardContent>
-                    <Typography variant="h6" sx={{ fontWeight: 600 }}>{m[2]}</Typography>
-                    <Typography variant="body2" sx={{ color: '#666', mb: 1 }}>{m[3]}</Typography>
-                    <Typography variant="caption" sx={{ color: '#999' }}>ID: {m[0]}</Typography>
-                    <Box sx={{ display: 'flex', gap: 2, mt: 1 }}>
-                      <Button
-                        variant="outlined"
-                        size="small"
-                        onClick={() => handleJoinMeeting(m[0])}
-                        disabled={isLoading}
-                      >
-                        Join
-                      </Button>
-                    </Box>
-                  </CardContent>
-                </Card>
-              ))}
-            </Box>
-          )}
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setViewAllOpen(false)}>Close</Button>
         </DialogActions>
       </Dialog>
 
