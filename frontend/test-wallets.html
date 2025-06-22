@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wallet Detection Test</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; }
+        .test-section { margin: 20px 0; padding: 15px; border: 1px solid #ccc; border-radius: 5px; }
+        .success { color: green; }
+        .error { color: red; }
+        .warning { color: orange; }
+        button { padding: 10px 15px; margin: 5px; cursor: pointer; }
+        pre { background: #f5f5f5; padding: 10px; border-radius: 3px; overflow-x: auto; }
+    </style>
+</head>
+<body>
+    <h1>Wallet Detection Test</h1>
+    
+    <div class="test-section">
+        <h2>Available Wallets</h2>
+        <button onclick="detectWallets()">Detect Wallets</button>
+        <div id="wallet-results"></div>
+    </div>
+
+    <div class="test-section">
+        <h2>Network Information</h2>
+        <button onclick="checkNetwork()">Check Network</button>
+        <div id="network-results"></div>
+    </div>
+
+    <div class="test-section">
+        <h2>Contract Availability</h2>
+        <button onclick="checkContract()">Check Contract</button>
+        <div id="contract-results"></div>
+    </div>
+
+    <script>
+        // Contract addresses for different networks
+        const CONTRACT_ADDRESSES = {
+            '0x1': '0x6be7c6a5fd0ed92b9d658932bc89dc5dcd1e8d16', // Kaia Kairos
+            '0x89': '0x0000000000000000000000000000000000000000', // Polygon (placeholder)
+            '0x1': '0x0000000000000000000000000000000000000000',  // Ethereum Mainnet (placeholder)
+            '0x38': '0x0000000000000000000000000000000000000000', // BSC (placeholder)
+        };
+
+        function detectWallets() {
+            const wallets = [];
+            const results = document.getElementById('wallet-results');
+            
+            // Check for MetaMask
+            if (window.ethereum && window.ethereum.isMetaMask) {
+                wallets.push({ type: 'metamask', provider: window.ethereum });
+            }
+            
+            // Check for Kaia Wallet
+            if (window.kaiaWallet) {
+                wallets.push({ type: 'kaia', provider: window.kaiaWallet });
+            }
+            
+            // Check for WalletConnect
+            if (window.WalletConnect) {
+                wallets.push({ type: 'walletconnect', provider: window.WalletConnect });
+            }
+            
+            // Check for other wallets
+            if (window.ethereum && !window.ethereum.isMetaMask) {
+                wallets.push({ type: 'generic', provider: window.ethereum });
+            }
+            
+            if (wallets.length === 0) {
+                results.innerHTML = '<p class="error">No wallets detected. Please install MetaMask, Kaia Wallet, or another compatible wallet.</p>';
+            } else {
+                results.innerHTML = `
+                    <p class="success">Found ${wallets.length} wallet(s):</p>
+                    <pre>${JSON.stringify(wallets, null, 2)}</pre>
+                `;
+            }
+        }
+
+        async function checkNetwork() {
+            const results = document.getElementById('network-results');
+            
+            if (!window.ethereum) {
+                results.innerHTML = '<p class="error">No wallet provider found.</p>';
+                return;
+            }
+            
+            try {
+                const provider = new ethers.BrowserProvider(window.ethereum);
+                const network = await provider.getNetwork();
+                
+                results.innerHTML = `
+                    <p class="success">Network detected:</p>
+                    <pre>Chain ID: ${network.chainId.toString()}
+Name: ${network.name || 'Unknown'}
+Network: ${network.name || 'Unknown'}</pre>
+                `;
+            } catch (error) {
+                results.innerHTML = `<p class="error">Error checking network: ${error.message}</p>`;
+            }
+        }
+
+        async function checkContract() {
+            const results = document.getElementById('contract-results');
+            
+            if (!window.ethereum) {
+                results.innerHTML = '<p class="error">No wallet provider found.</p>';
+                return;
+            }
+            
+            try {
+                const provider = new ethers.BrowserProvider(window.ethereum);
+                const network = await provider.getNetwork();
+                const chainId = network.chainId.toString();
+                const contractAddress = CONTRACT_ADDRESSES[chainId];
+                
+                if (contractAddress && contractAddress !== '0x0000000000000000000000000000000000000000') {
+                    results.innerHTML = `
+                        <p class="success">Contract available on this network!</p>
+                        <pre>Chain ID: ${chainId}
+Contract Address: ${contractAddress}</pre>
+                    `;
+                } else {
+                    results.innerHTML = `
+                        <p class="warning">No contract deployed on this network.</p>
+                        <pre>Chain ID: ${chainId}
+Status: No contract available</pre>
+                    `;
+                }
+            } catch (error) {
+                results.innerHTML = `<p class="error">Error checking contract: ${error.message}</p>`;
+            }
+        }
+
+        // Auto-detect on page load
+        window.onload = function() {
+            detectWallets();
+        };
+    </script>
+    
+    <!-- Include ethers.js for network checking -->
+    <script src="https://cdn.ethers.io/lib/ethers-5.7.2.umd.min.js"></script>
+</body>
+</html>
