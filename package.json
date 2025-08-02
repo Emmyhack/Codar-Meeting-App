@@ -13,7 +13,11 @@
     "kaia:list": "node utils/kaia-deploy.js list",
     "node": "hh klaytn-node",
     "console": "hh klaytn-node --attach",
-    "explorer": "hh explorer --network localhost"
+    "explorer": "hh explorer --network localhost",
+    "start:backend": "cd backend && npm start",
+    "start:frontend": "cd frontend && npm run dev",
+    "start:all": "concurrently \"npm run start:backend\" \"npm run start:frontend\"",
+    "test:servers": "node test-servers.js"
   },
   "keywords": [],
   "author": "",
@@ -37,14 +41,14 @@
     "solidity-coverage": "^0.8.16",
     "ts-node": "^10.9.2",
     "typechain": "^8.3.2",
-    "typescript": "^5.8.3"
+    "typescript": "^5.8.3",
+    "concurrently": "^8.2.2"
   },
   "dependencies": {
     "@kaiachain/ethers-ext": "^2.0.7",
     "@klaytn/hardhat-utils": "^0.0.17",
     "@livekit/components-styles": "^1.1.6",
     "dotenv": "^16.5.0",
-    "ethers": "^5.8.0",
-    "simple-peer": "^9.11.1"
+    "ethers": "^5.8.0"
   }
 }
