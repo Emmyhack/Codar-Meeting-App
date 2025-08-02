@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { 
   Box, 
   Button, 
@@ -40,15 +40,55 @@ import {
 } from '@mui/icons-material';
 import WebRTCService from './services/WebRTCService';
 
+// Error Boundary Component
+class VideoCallErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error, errorInfo) {
+    console.error('VideoCall Error Boundary caught an error:', error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <Dialog open={true} maxWidth="sm" fullWidth>
+          <Box sx={{ p: 4, textAlign: 'center' }}>
+            <Alert severity="error" sx={{ mb: 2 }}>
+              Something went wrong with the video call. Please refresh the page to try again.
+            </Alert>
+            <Button 
+              variant="contained" 
+              onClick={() => window.location.reload()}
+            >
+              Refresh Page
+            </Button>
+          </Box>
+        </Dialog>
+      );
+    }
+
+    return this.props.children;
+  }
+}
+
 const VideoChat = ({ open, onClose, roomName }) => {
+  // Create WebRTC service instance with useMemo to prevent recreation
+  const webrtcService = useMemo(() => new WebRTCService(), []);
+  
   // Core state
-  const [webrtcService] = useState(() => new WebRTCService());
   const [localStream, setLocalStream] = useState(null);
   const [remoteStreams, setRemoteStreams] = useState(new Map());
   const [participants, setParticipants] = useState([]);
   
   // Connection state
-  const [connectionState, setConnectionState] = useState('disconnected'); // disconnected, connecting, connected, error, reconnecting
+  const [connectionState, setConnectionState] = useState('disconnected');
   const [isJoining, setIsJoining] = useState(false);
   const [connectionError, setConnectionError] = useState('');
   
@@ -63,7 +103,7 @@ const VideoChat = ({ open, onClose, roomName }) => {
   const [chatMessages, setChatMessages] = useState([]);
   const [newMessage, setNewMessage] = useState('');
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [mainVideoId, setMainVideoId] = useState(null); // null = local, or participant ID
+  const [mainVideoId, setMainVideoId] = useState(null);
   
   // Notifications
   const [notification, setNotification] = useState({ open: false, message: '', severity: 'info' });
@@ -73,27 +113,77 @@ const VideoChat = ({ open, onClose, roomName }) => {
   const remoteVideoRefs = useRef(new Map());
   const chatEndRef = useRef();
   const dialogRef = useRef();
+  const isMountedRef = useRef(true);
+  const cleanupCallbacksRef = useRef([]);
 
-  // Initialize WebRTC service and setup callbacks
+  // Cleanup function to prevent memory leaks
+  const cleanup = useCallback(() => {
+    console.log('🧹 Cleaning up VideoChat component...');
+    
+    // Stop all video elements
+    if (localVideoRef.current) {
+      localVideoRef.current.srcObject = null;
+    }
+    
+    remoteVideoRefs.current.forEach((videoRef) => {
+      if (videoRef) {
+        videoRef.srcObject = null;
+      }
+    });
+    remoteVideoRefs.current.clear();
+    
+    // Stop local stream
+    if (localStream) {
+      localStream.getTracks().forEach(track => {
+        try {
+          track.stop();
+        } catch (error) {
+          console.error('Error stopping track:', error);
+        }
+      });
+      setLocalStream(null);
+    }
+    
+    // Clean up WebRTC service
+    if (webrtcService) {
+      webrtcService.disconnect();
+    }
+    
+    // Clear all state
+    setRemoteStreams(new Map());
+    setParticipants([]);
+    setParticipantMediaStates(new Map());
+    setChatMessages([]);
+    setConnectionError('');
+    setConnectionState('disconnected');
+    
+    // Run any additional cleanup callbacks
+    cleanupCallbacksRef.current.forEach(callback => {
+      try {
+        callback();
+      } catch (error) {
+        console.error('Error in cleanup callback:', error);
+      }
+    });
+    cleanupCallbacksRef.current = [];
+    
+    console.log('✅ VideoChat component cleaned up');
+  }, [localStream, webrtcService]);
+
+  // Set mounted flag
   useEffect(() => {
-    if (!open) return;
-
-    setupWebRTCCallbacks();
-    initializeCall();
-
+    isMountedRef.current = true;
     return () => {
-      cleanup();
+      isMountedRef.current = false;
     };
-  }, [open]);
-
-  // Auto-scroll chat to bottom
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [chatMessages]);
+  }, []);
 
   // Setup WebRTC service callbacks
   const setupWebRTCCallbacks = useCallback(() => {
+    if (!webrtcService || !isMountedRef.current) return;
+
     webrtcService.onConnectionStateChange((state) => {
+      if (!isMountedRef.current) return;
       setConnectionState(state);
       if (state === 'connected') {
         setConnectionError('');
@@ -101,22 +191,30 @@ const VideoChat = ({ open, onClose, roomName }) => {
     });
 
     webrtcService.onError((error) => {
+      if (!isMountedRef.current) return;
       setConnectionError(error);
       showNotification(error, 'error');
     });
 
     webrtcService.onJoinedRoom((data) => {
+      if (!isMountedRef.current) return;
       console.log('Joined room successfully:', data);
       setParticipants(data.existingParticipants || []);
       showNotification('Joined meeting successfully!', 'success');
     });
 
     webrtcService.onUserJoined((data) => {
-      setParticipants(prev => [...prev, data.participant]);
+      if (!isMountedRef.current) return;
+      setParticipants(prev => {
+        const exists = prev.some(p => p.id === data.participant.id);
+        if (exists) return prev;
+        return [...prev, data.participant];
+      });
       showNotification(`${data.participant.userInfo?.name || 'Someone'} joined the meeting`, 'info');
     });
 
     webrtcService.onUserLeft((data) => {
+      if (!isMountedRef.current) return;
       setParticipants(prev => prev.filter(p => p.id !== data.participantId));
       setRemoteStreams(prev => {
         const newStreams = new Map(prev);
@@ -128,11 +226,21 @@ const VideoChat = ({ open, onClose, roomName }) => {
         newStates.delete(data.participantId);
         return newStates;
       });
+      
+      // Clean up video ref
+      const videoRef = remoteVideoRefs.current.get(data.participantId);
+      if (videoRef) {
+        videoRef.srcObject = null;
+        remoteVideoRefs.current.delete(data.participantId);
+      }
+      
       showNotification('Someone left the meeting', 'info');
     });
 
     webrtcService.onRemoteStream((participantId, stream) => {
+      if (!isMountedRef.current) return;
       console.log('Received remote stream from:', participantId);
+      
       setRemoteStreams(prev => {
         const newStreams = new Map(prev);
         newStreams.set(participantId, stream);
@@ -140,17 +248,23 @@ const VideoChat = ({ open, onClose, roomName }) => {
       });
       
       // Auto-set main video to first remote participant
-      if (!mainVideoId && participantId) {
-        setMainVideoId(participantId);
-      }
+      setMainVideoId(prevMain => {
+        if (!prevMain && participantId) {
+          return participantId;
+        }
+        return prevMain;
+      });
     });
 
     webrtcService.onChatMessage((message) => {
-      const participant = participants.find(p => p.id === message.fromId);
-      setChatMessages(prev => [...prev, {
-        ...message,
-        senderName: participant?.userInfo?.name || 'Unknown'
-      }]);
+      if (!isMountedRef.current) return;
+      setChatMessages(prev => {
+        const participant = participants.find(p => p.id === message.fromId);
+        return [...prev, {
+          ...message,
+          senderName: participant?.userInfo?.name || 'Unknown'
+        }];
+      });
       
       if (!showChat) {
         showNotification('New chat message', 'info');
@@ -158,6 +272,7 @@ const VideoChat = ({ open, onClose, roomName }) => {
     });
 
     webrtcService.onMediaStateUpdate((data) => {
+      if (!isMountedRef.current) return;
       setParticipantMediaStates(prev => {
         const newStates = new Map(prev);
         newStates.set(data.participantId, data.mediaState);
@@ -166,16 +281,22 @@ const VideoChat = ({ open, onClose, roomName }) => {
     });
 
     webrtcService.onScreenShareStart((data) => {
-      showNotification(`${getParticipantName(data.participantId)} started screen sharing`, 'info');
+      if (!isMountedRef.current) return;
+      const participantName = getParticipantName(data.participantId);
+      showNotification(`${participantName} started screen sharing`, 'info');
     });
 
     webrtcService.onScreenShareStop((data) => {
-      showNotification(`${getParticipantName(data.participantId)} stopped screen sharing`, 'info');
+      if (!isMountedRef.current) return;
+      const participantName = getParticipantName(data.participantId);
+      showNotification(`${participantName} stopped screen sharing`, 'info');
     });
-  }, [participants, mainVideoId, showChat]);
+  }, [webrtcService, participants, showChat]);
 
   // Initialize the call
-  const initializeCall = async () => {
+  const initializeCall = useCallback(async () => {
+    if (!isMountedRef.current) return;
+    
     try {
       setIsJoining(true);
       setConnectionState('connecting');
@@ -189,16 +310,27 @@ const VideoChat = ({ open, onClose, roomName }) => {
         console.log('Could not copy to clipboard:', err);
       }
 
+      // Setup callbacks first
+      setupWebRTCCallbacks();
+
       // Connect to signaling server
       await webrtcService.connect();
 
+      if (!isMountedRef.current) return;
+
       // Initialize media
       const stream = await webrtcService.initializeMedia();
+      
+      if (!isMountedRef.current) return;
+      
       setLocalStream(stream);
       
-      if (localVideoRef.current) {
-        localVideoRef.current.srcObject = stream;
-      }
+      // Set video source after state update
+      setTimeout(() => {
+        if (localVideoRef.current && stream) {
+          localVideoRef.current.srcObject = stream;
+        }
+      }, 100);
 
       // Join room
       const roomId = roomName.replace(/\s+/g, '-').toLowerCase();
@@ -209,37 +341,66 @@ const VideoChat = ({ open, onClose, roomName }) => {
 
     } catch (error) {
       console.error('Failed to initialize call:', error);
-      setConnectionError(`Failed to join meeting: ${error.message}`);
-      setConnectionState('error');
+      if (isMountedRef.current) {
+        setConnectionError(`Failed to join meeting: ${error.message}`);
+        setConnectionState('error');
+      }
     } finally {
-      setIsJoining(false);
+      if (isMountedRef.current) {
+        setIsJoining(false);
+      }
     }
-  };
+  }, [roomName, webrtcService, setupWebRTCCallbacks]);
 
-  // Cleanup
-  const cleanup = useCallback(() => {
-    if (localStream) {
-      localStream.getTracks().forEach(track => track.stop());
+  // Main effect for handling component open/close
+  useEffect(() => {
+    if (open && isMountedRef.current) {
+      initializeCall();
     }
-    webrtcService.disconnect();
-    setLocalStream(null);
-    setRemoteStreams(new Map());
-    setParticipants([]);
-    setParticipantMediaStates(new Map());
-    setChatMessages([]);
-  }, [localStream, webrtcService]);
+    
+    return () => {
+      if (!open) {
+        cleanup();
+      }
+    };
+  }, [open, initializeCall, cleanup]);
 
-  // Media controls
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      isMountedRef.current = false;
+      cleanup();
+    };
+  }, [cleanup]);
+
+  // Auto-scroll chat to bottom
+  useEffect(() => {
+    if (chatEndRef.current) {
+      chatEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [chatMessages]);
+
+  // Media controls with error handling
   const toggleAudio = useCallback(() => {
-    const enabled = webrtcService.toggleAudio();
-    setIsAudioMuted(!enabled);
-    showNotification(enabled ? 'Microphone on' : 'Microphone off', 'info');
+    try {
+      const enabled = webrtcService.toggleAudio();
+      setIsAudioMuted(!enabled);
+      showNotification(enabled ? 'Microphone on' : 'Microphone off', 'info');
+    } catch (error) {
+      console.error('Error toggling audio:', error);
+      showNotification('Failed to toggle microphone', 'error');
+    }
   }, [webrtcService]);
 
   const toggleVideo = useCallback(() => {
-    const enabled = webrtcService.toggleVideo();
-    setIsVideoOff(!enabled);
-    showNotification(enabled ? 'Camera on' : 'Camera off', 'info');
+    try {
+      const enabled = webrtcService.toggleVideo();
+      setIsVideoOff(!enabled);
+      showNotification(enabled ? 'Camera on' : 'Camera off', 'info');
+    } catch (error) {
+      console.error('Error toggling video:', error);
+      showNotification('Failed to toggle camera', 'error');
+    }
   }, [webrtcService]);
 
   const toggleScreenShare = useCallback(async () => {
@@ -266,8 +427,13 @@ const VideoChat = ({ open, onClose, roomName }) => {
   const sendMessage = useCallback((e) => {
     e.preventDefault();
     if (newMessage.trim() && webrtcService) {
-      webrtcService.sendChatMessage(newMessage.trim());
-      setNewMessage('');
+      try {
+        webrtcService.sendChatMessage(newMessage.trim());
+        setNewMessage('');
+      } catch (error) {
+        console.error('Error sending message:', error);
+        showNotification('Failed to send message', 'error');
+      }
     }
   }, [newMessage, webrtcService]);
 
@@ -277,7 +443,9 @@ const VideoChat = ({ open, onClose, roomName }) => {
 
   // Utility functions
   const showNotification = useCallback((message, severity = 'info') => {
-    setNotification({ open: true, message, severity });
+    if (isMountedRef.current) {
+      setNotification({ open: true, message, severity });
+    }
   }, []);
 
   const hideNotification = useCallback(() => {
@@ -297,19 +465,40 @@ const VideoChat = ({ open, onClose, roomName }) => {
     } catch (error) {
       showNotification('Failed to copy link', 'error');
     }
-  }, [roomName]);
+  }, [roomName, showNotification]);
 
   const toggleFullscreen = useCallback(() => {
-    if (!document.fullscreenElement) {
-      dialogRef.current?.requestFullscreen?.();
-      setIsFullscreen(true);
-    } else {
-      document.exitFullscreen?.();
-      setIsFullscreen(false);
+    try {
+      if (!document.fullscreenElement) {
+        dialogRef.current?.requestFullscreen?.();
+        setIsFullscreen(true);
+      } else {
+        document.exitFullscreen?.();
+        setIsFullscreen(false);
+      }
+    } catch (error) {
+      console.error('Fullscreen error:', error);
+      showNotification('Fullscreen not supported', 'warning');
     }
+  }, [showNotification]);
+
+  // Handle fullscreen change events
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      setIsFullscreen(!!document.fullscreenElement);
+    };
+
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    cleanupCallbacksRef.current.push(() => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+    });
+
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+    };
   }, []);
 
-  // Render video element
+  // Render video element with proper error handling
   const renderVideoElement = useCallback((participantId, stream, isLocal = false) => {
     const mediaState = participantMediaStates.get(participantId) || { video: true, audio: true };
     const participant = participants.find(p => p.id === participantId);
@@ -322,13 +511,19 @@ const VideoChat = ({ open, onClose, roomName }) => {
           position: 'relative', 
           minHeight: 200,
           cursor: 'pointer',
-          border: mainVideoId === participantId ? '3px solid #1976d2' : 'none'
+          border: mainVideoId === participantId ? '3px solid #1976d2' : 'none',
+          overflow: 'hidden'
         }}
         onClick={() => setMainVideoId(participantId)}
       >
         <video
           ref={isLocal ? localVideoRef : (el) => {
-            if (el) remoteVideoRefs.current.set(participantId, el);
+            if (el && participantId) {
+              remoteVideoRefs.current.set(participantId, el);
+              if (stream) {
+                el.srcObject = stream;
+              }
+            }
           }}
           autoPlay
           playsInline
@@ -339,10 +534,11 @@ const VideoChat = ({ open, onClose, roomName }) => {
             objectFit: 'cover',
             backgroundColor: '#000'
           }}
+          onError={(e) => {
+            console.error('Video element error:', e);
+          }}
           onLoadedMetadata={(e) => {
-            if (!isLocal && stream) {
-              e.target.srcObject = stream;
-            }
+            console.log('Video metadata loaded for:', isLocal ? 'local' : participantId);
           }}
         />
         
@@ -397,47 +593,55 @@ const VideoChat = ({ open, onClose, roomName }) => {
     );
   }, [participantMediaStates, participants, mainVideoId]);
 
+  // Get main video stream
+  const mainStream = useMemo(() => {
+    return mainVideoId ? remoteStreams.get(mainVideoId) : localStream;
+  }, [mainVideoId, remoteStreams, localStream]);
+
+  const isMainLocal = !mainVideoId;
+
   // Loading state
   if (isJoining) {
     return (
-      <Dialog open={open} maxWidth="sm" fullWidth>
-        <Box sx={{ p: 4, textAlign: 'center' }}>
-          <CircularProgress sx={{ mb: 2 }} />
-          <Typography variant="h6">Joining meeting...</Typography>
-          <Typography color="text.secondary">
-            Setting up your camera and microphone
-          </Typography>
-        </Box>
-      </Dialog>
+      <VideoCallErrorBoundary>
+        <Dialog open={open} maxWidth="sm" fullWidth>
+          <Box sx={{ p: 4, textAlign: 'center' }}>
+            <CircularProgress sx={{ mb: 2 }} />
+            <Typography variant="h6">Joining meeting...</Typography>
+            <Typography color="text.secondary">
+              Setting up your camera and microphone
+            </Typography>
+          </Box>
+        </Dialog>
+      </VideoCallErrorBoundary>
     );
   }
 
   // Error state
   if (connectionState === 'error') {
     return (
-      <Dialog open={open} maxWidth="sm" fullWidth>
-        <Box sx={{ p: 4, textAlign: 'center' }}>
-          <Alert severity="error" sx={{ mb: 2 }}>
-            {connectionError || 'Failed to join the meeting'}
-          </Alert>
-          <Box sx={{ display: 'flex', gap: 2, justifyContent: 'center' }}>
-            <Button variant="contained" onClick={initializeCall}>
-              Try Again
-            </Button>
-            <Button variant="outlined" onClick={onClose}>
-              Cancel
-            </Button>
+      <VideoCallErrorBoundary>
+        <Dialog open={open} maxWidth="sm" fullWidth>
+          <Box sx={{ p: 4, textAlign: 'center' }}>
+            <Alert severity="error" sx={{ mb: 2 }}>
+              {connectionError || 'Failed to join the meeting'}
+            </Alert>
+            <Box sx={{ display: 'flex', gap: 2, justifyContent: 'center' }}>
+              <Button variant="contained" onClick={initializeCall}>
+                Try Again
+              </Button>
+              <Button variant="outlined" onClick={onClose}>
+                Cancel
+              </Button>
+            </Box>
           </Box>
-        </Box>
-      </Dialog>
+        </Dialog>
+      </VideoCallErrorBoundary>
     );
   }
 
-  const mainStream = mainVideoId ? remoteStreams.get(mainVideoId) : localStream;
-  const isMainLocal = !mainVideoId;
-
   return (
-    <>
+    <VideoCallErrorBoundary>
       <Dialog 
         open={open} 
         maxWidth={false}
@@ -451,6 +655,7 @@ const VideoChat = ({ open, onClose, roomName }) => {
             m: isFullscreen ? 0 : 2
           }
         }}
+        onClose={null} // Prevent accidental close
       >
         <Box sx={{ 
           height: '100%', 
@@ -496,7 +701,7 @@ const VideoChat = ({ open, onClose, roomName }) => {
                 </IconButton>
               </Tooltip>
               <Tooltip title="Close">
-                <IconButton onClick={onClose} sx={{ color: 'white' }}>
+                <IconButton onClick={endCall} sx={{ color: 'white' }}>
                   <Close />
                 </IconButton>
               </Tooltip>
@@ -569,7 +774,7 @@ const VideoChat = ({ open, onClose, roomName }) => {
                 
                 <Box sx={{ flex: 1, overflow: 'auto', p: 1 }}>
                   {chatMessages.map((message, index) => (
-                    <Box key={index} sx={{ mb: 1 }}>
+                    <Box key={`${message.id || index}-${message.timestamp}`} sx={{ mb: 1 }}>
                       <Typography variant="caption" color="text.secondary">
                         {message.senderName}
                       </Typography>
@@ -589,6 +794,7 @@ const VideoChat = ({ open, onClose, roomName }) => {
                       placeholder="Type a message..."
                       value={newMessage}
                       onChange={(e) => setNewMessage(e.target.value)}
+                      inputProps={{ maxLength: 500 }}
                     />
                     <IconButton type="submit" disabled={!newMessage.trim()}>
                       <Send />
@@ -656,7 +862,7 @@ const VideoChat = ({ open, onClose, roomName }) => {
                   '&:hover': { backgroundColor: showChat ? 'primary.dark' : 'grey.600' }
                 }}
               >
-                <Badge badgeContent={chatMessages.length} color="error">
+                <Badge badgeContent={chatMessages.length > 0 ? chatMessages.length : null} color="error">
                   <ChatBubbleOutline />
                 </Badge>
               </IconButton>
@@ -689,7 +895,7 @@ const VideoChat = ({ open, onClose, roomName }) => {
           {notification.message}
         </Alert>
       </Snackbar>
-    </>
+    </VideoCallErrorBoundary>
   );
 };
 

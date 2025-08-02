@@ -11,6 +11,9 @@ class WebRTCService {
     this.reconnectAttempts = 0;
     this.maxReconnectAttempts = 5;
     this.reconnectInterval = 1000;
+    this.isCleanedUp = false;
+    this.connectionTimeout = null;
+    this.heartbeatInterval = null;
     
     // ICE servers configuration (including free STUN servers)
     this.iceServers = [
@@ -21,7 +24,7 @@ class WebRTCService {
       { urls: 'stun:stun4.l.google.com:19302' }
     ];
     
-    // Media constraints
+    // Media constraints with fallback options
     this.mediaConstraints = {
       video: {
         width: { ideal: 1280, max: 1920 },
@@ -33,6 +36,20 @@ class WebRTCService {
         noiseSuppression: true,
         autoGainControl: true,
         sampleRate: 48000
+      }
+    };
+
+    // Fallback constraints for older devices
+    this.fallbackMediaConstraints = {
+      video: {
+        width: { ideal: 640, max: 1280 },
+        height: { ideal: 480, max: 720 },
+        frameRate: { ideal: 15, max: 30 }
+      },
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true
       }
     };
     
@@ -50,87 +67,74 @@ class WebRTCService {
       onScreenShareStop: null,
       onHostChanged: null
     };
+
+    // Bind methods to prevent memory leaks
+    this.handleConnect = this.handleConnect.bind(this);
+    this.handleDisconnect = this.handleDisconnect.bind(this);
+    this.handleError = this.handleError.bind(this);
+    this.handleReconnect = this.handleReconnect.bind(this);
+    this.handleReconnectFailed = this.handleReconnectFailed.bind(this);
+
+    // Start heartbeat to keep connection alive
+    this.startHeartbeat();
   }
 
   // Initialize connection to signaling server
   async connect(serverUrl = 'http://localhost:3002') {
+    if (this.isCleanedUp) {
+      throw new Error('WebRTC service has been cleaned up');
+    }
+
     try {
       console.log('🔌 Connecting to signaling server...');
       
+      if (this.socket) {
+        this.socket.removeAllListeners();
+        this.socket.disconnect();
+      }
+
       this.socket = io(serverUrl, {
         autoConnect: true,
         reconnection: true,
         reconnectionAttempts: this.maxReconnectAttempts,
         reconnectionDelay: this.reconnectInterval,
         timeout: 10000,
-        forceNew: true
+        forceNew: true,
+        transports: ['websocket', 'polling'] // Allow fallback
       });
 
-      await new Promise((resolve, reject) => {
+      return new Promise((resolve, reject) => {
+        if (this.connectionTimeout) {
+          clearTimeout(this.connectionTimeout);
+        }
+
+        this.connectionTimeout = setTimeout(() => {
+          this.callbacks.onError?.('Connection timeout');
+          reject(new Error('Connection timeout'));
+        }, 15000);
+
         // Connection established
-        this.socket.on('connect', () => {
-          console.log('✅ Connected to signaling server:', this.socket.id);
-          this.isConnected = true;
-          this.reconnectAttempts = 0;
-          this.callbacks.onConnectionStateChange?.('connected');
+        this.socket.once('connect', () => {
+          if (this.connectionTimeout) {
+            clearTimeout(this.connectionTimeout);
+            this.connectionTimeout = null;
+          }
+          this.handleConnect();
           resolve();
         });
 
         // Connection error
-        this.socket.on('connect_error', (error) => {
-          console.error('❌ Connection error:', error);
-          this.isConnected = false;
-          this.callbacks.onConnectionStateChange?.('error');
-          this.callbacks.onError?.(`Connection failed: ${error.message}`);
+        this.socket.once('connect_error', (error) => {
+          if (this.connectionTimeout) {
+            clearTimeout(this.connectionTimeout);
+            this.connectionTimeout = null;
+          }
+          this.handleError(error);
           reject(error);
         });
 
-        // Disconnect
-        this.socket.on('disconnect', (reason) => {
-          console.log('❌ Disconnected:', reason);
-          this.isConnected = false;
-          this.callbacks.onConnectionStateChange?.('disconnected');
-          
-          if (reason === 'io server disconnect') {
-            // Server disconnected, try to reconnect
-            this.handleReconnection();
-          }
-        });
-
-        // Reconnection attempt
-        this.socket.on('reconnect_attempt', (attemptNumber) => {
-          console.log(`🔄 Reconnection attempt ${attemptNumber}/${this.maxReconnectAttempts}`);
-          this.callbacks.onConnectionStateChange?.('reconnecting');
-        });
-
-        // Reconnection successful
-        this.socket.on('reconnect', () => {
-          console.log('✅ Reconnected successfully');
-          this.isConnected = true;
-          this.callbacks.onConnectionStateChange?.('connected');
-          
-          // Rejoin room if we were in one
-          if (this.roomId) {
-            this.rejoinRoom();
-          }
-        });
-
-        // Reconnection failed
-        this.socket.on('reconnect_failed', () => {
-          console.error('❌ Reconnection failed');
-          this.callbacks.onConnectionStateChange?.('failed');
-          this.callbacks.onError?.('Failed to reconnect to server');
-        });
-
-        // Set up signaling message handlers
-        this.setupSignalingHandlers();
-        
-        // Timeout fallback
-        setTimeout(() => {
-          if (!this.isConnected) {
-            reject(new Error('Connection timeout'));
-          }
-        }, 10000);
+        // Set up all event handlers
+        this.setupEventHandlers();
       });
 
     } catch (error) {
@@ -140,93 +144,190 @@ class WebRTCService {
     }
   }
 
+  handleConnect() {
+    console.log('✅ Connected to signaling server:', this.socket.id);
+    this.isConnected = true;
+    this.reconnectAttempts = 0;
+    this.callbacks.onConnectionStateChange?.('connected');
+  }
+
+  handleDisconnect(reason) {
+    console.log('❌ Disconnected:', reason);
+    this.isConnected = false;
+    this.callbacks.onConnectionStateChange?.('disconnected');
+    
+    if (reason === 'io server disconnect' && !this.isCleanedUp) {
+      // Server disconnected, try to reconnect
+      this.handleReconnection();
+    }
+  }
+
+  handleError(error) {
+    console.error('❌ Connection error:', error);
+    this.isConnected = false;
+    this.callbacks.onConnectionStateChange?.('error');
+    this.callbacks.onError?.(`Connection failed: ${error.message}`);
+  }
+
+  handleReconnect() {
+    console.log('✅ Reconnected successfully');
+    this.isConnected = true;
+    this.callbacks.onConnectionStateChange?.('connected');
+    
+    // Rejoin room if we were in one
+    if (this.roomId && !this.isCleanedUp) {
+      this.rejoinRoom();
+    }
+  }
+
+  handleReconnectFailed() {
+    console.error('❌ Reconnection failed');
+    this.callbacks.onConnectionStateChange?.('failed');
+    this.callbacks.onError?.('Failed to reconnect to server');
+  }
+
   // Set up all signaling message handlers
-  setupSignalingHandlers() {
-    // Successfully joined room
+  setupEventHandlers() {
+    if (!this.socket || this.isCleanedUp) return;
+
+    // Connection events
+    this.socket.on('disconnect', this.handleDisconnect);
+    this.socket.on('connect_error', this.handleError);
+    this.socket.on('reconnect_attempt', (attemptNumber) => {
+      console.log(`🔄 Reconnection attempt ${attemptNumber}/${this.maxReconnectAttempts}`);
+      this.callbacks.onConnectionStateChange?.('reconnecting');
+    });
+    this.socket.on('reconnect', this.handleReconnect);
+    this.socket.on('reconnect_failed', this.handleReconnectFailed);
+
+    // Room events
     this.socket.on('joined-room', (data) => {
+      if (this.isCleanedUp) return;
       console.log('✅ Joined room:', data);
       this.roomId = data.roomId;
       this.callbacks.onJoinedRoom?.(data);
       
       // Initiate connections to existing participants
-      data.existingParticipants?.forEach(participant => {
-        this.createPeerConnection(participant.id, true); // true = create offer
-      });
+      if (data.existingParticipants?.length > 0) {
+        data.existingParticipants.forEach(participant => {
+          if (participant.id !== this.socket.id) {
+            this.createPeerConnection(participant.id, true); // true = create offer
+          }
+        });
+      }
     });
 
-    // New user joined
     this.socket.on('user-joined', (data) => {
+      if (this.isCleanedUp) return;
       console.log('👤 User joined:', data);
       this.callbacks.onUserJoined?.(data);
       
       // Create peer connection but don't create offer (wait for their offer)
-      this.createPeerConnection(data.participant.id, false);
+      if (data.participant?.id && data.participant.id !== this.socket.id) {
+        this.createPeerConnection(data.participant.id, false);
+      }
     });
 
-    // User left
     this.socket.on('user-left', (data) => {
+      if (this.isCleanedUp) return;
       console.log('👋 User left:', data);
       this.callbacks.onUserLeft?.(data);
-      this.removePeerConnection(data.participantId);
+      if (data.participantId) {
+        this.removePeerConnection(data.participantId);
+      }
     });
 
-    // WebRTC offer received
+    // WebRTC signaling events
     this.socket.on('offer', async (data) => {
+      if (this.isCleanedUp) return;
       console.log('📞 Received offer from:', data.fromId);
       await this.handleOffer(data);
     });
 
-    // WebRTC answer received
     this.socket.on('answer', async (data) => {
+      if (this.isCleanedUp) return;
       console.log('📱 Received answer from:', data.fromId);
       await this.handleAnswer(data);
     });
 
-    // ICE candidate received
     this.socket.on('ice-candidate', async (data) => {
+      if (this.isCleanedUp) return;
       await this.handleIceCandidate(data);
     });
 
-    // Chat message received
+    // Other events
     this.socket.on('chat-message', (data) => {
+      if (this.isCleanedUp) return;
       console.log('💬 Chat message:', data);
       this.callbacks.onChatMessage?.(data);
     });
 
-    // Media state update
     this.socket.on('participant-media-update', (data) => {
+      if (this.isCleanedUp) return;
       console.log('🎤📹 Media state update:', data);
       this.callbacks.onMediaStateUpdate?.(data);
     });
 
-    // Screen share events
     this.socket.on('participant-screen-share-start', (data) => {
+      if (this.isCleanedUp) return;
       console.log('🖥️ Screen share started:', data);
       this.callbacks.onScreenShareStart?.(data);
     });
 
     this.socket.on('participant-screen-share-stop', (data) => {
+      if (this.isCleanedUp) return;
       console.log('🖥️ Screen share stopped:', data);
       this.callbacks.onScreenShareStop?.(data);
     });
 
-    // Host changed
     this.socket.on('host-changed', (data) => {
+      if (this.isCleanedUp) return;
       console.log('👑 Host changed:', data);
       this.callbacks.onHostChanged?.(data);
     });
 
-    // Join error
     this.socket.on('join-error', (data) => {
+      if (this.isCleanedUp) return;
       console.error('❌ Join error:', data);
       this.callbacks.onError?.(data.error);
     });
+
+    this.socket.on('server-shutdown', (data) => {
+      console.log('🔄 Server is shutting down:', data.message);
+      this.callbacks.onError?.('Server is shutting down. Please refresh the page.');
+    });
+  }
+
+  // Start heartbeat to keep connection alive
+  startHeartbeat() {
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+    }
+    
+    this.heartbeatInterval = setInterval(() => {
+      if (this.socket && this.socket.connected && !this.isCleanedUp) {
+        this.socket.emit('ping');
+      }
+    }, 30000); // Every 30 seconds
   }
 
   // Join a room
   async joinRoom(roomId, userInfo = {}) {
+    if (this.isCleanedUp) {
+      throw new Error('WebRTC service has been cleaned up');
+    }
+
     if (!this.isConnected) {
       throw new Error('Not connected to signaling server');
+    }
+
+    // Validate inputs
+    if (!roomId || typeof roomId !== 'string') {
+      throw new Error('Room ID must be a non-empty string');
+    }
+
+    if (!userInfo || typeof userInfo !== 'object') {
+      throw new Error('User info must be an object');
     }
 
     console.log('🚪 Joining room:', roomId);
@@ -244,34 +345,54 @@ class WebRTCService {
 
   // Rejoin room after reconnection
   async rejoinRoom() {
-    if (this.roomId) {
+    if (this.roomId && !this.isCleanedUp) {
       console.log('🔄 Rejoining room after reconnection:', this.roomId);
-      await this.joinRoom(this.roomId);
+      try {
+        await this.joinRoom(this.roomId);
+      } catch (error) {
+        console.error('Failed to rejoin room:', error);
+        this.callbacks.onError?.('Failed to rejoin room after reconnection');
+      }
     }
   }
 
   // Leave current room
   leaveRoom() {
-    if (this.socket && this.roomId) {
+    if (this.socket && this.roomId && !this.isCleanedUp) {
       console.log('👋 Leaving room:', this.roomId);
       this.socket.emit('leave-room');
       
       // Close all peer connections
       this.peers.forEach((peer, peerId) => {
-        peer.close();
+        this.removePeerConnection(peerId);
       });
-      this.peers.clear();
       
       this.roomId = null;
     }
   }
 
-  // Initialize local media
+  // Initialize local media with fallback
   async initializeMedia(constraints = this.mediaConstraints) {
+    if (this.isCleanedUp) {
+      throw new Error('WebRTC service has been cleaned up');
+    }
+
     try {
       console.log('🎥 Initializing media with constraints:', constraints);
       
-      this.localStream = await navigator.mediaDevices.getUserMedia(constraints);
+      // Stop any existing stream
+      if (this.localStream) {
+        this.localStream.getTracks().forEach(track => track.stop());
+        this.localStream = null;
+      }
+
+      try {
+        this.localStream = await navigator.mediaDevices.getUserMedia(constraints);
+      } catch (primaryError) {
+        console.warn('Primary media constraints failed, trying fallback:', primaryError);
+        // Try fallback constraints
+        this.localStream = await navigator.mediaDevices.getUserMedia(this.fallbackMediaConstraints);
+      }
       
       console.log('✅ Local media initialized:', {
         videoTracks: this.localStream.getVideoTracks().length,
@@ -280,14 +401,18 @@ class WebRTCService {
 
       // Add tracks to existing peer connections
       this.peers.forEach((peer) => {
-        this.localStream.getTracks().forEach(track => {
-          const sender = peer.getSenders().find(s => s.track?.kind === track.kind);
-          if (sender) {
-            sender.replaceTrack(track);
-          } else {
-            peer.addTrack(track, this.localStream);
-          }
-        });
+        if (peer.connectionState !== 'closed') {
+          this.localStream.getTracks().forEach(track => {
+            const sender = peer.getSenders().find(s => s.track?.kind === track.kind);
+            if (sender) {
+              sender.replaceTrack(track).catch(error => {
+                console.error('Failed to replace track:', error);
+              });
+            } else {
+              peer.addTrack(track, this.localStream);
+            }
+          });
+        }
       });
 
       return this.localStream;
@@ -298,25 +423,60 @@ class WebRTCService {
     }
   }
 
-  // Create peer connection
+  // Create peer connection with comprehensive error handling
   async createPeerConnection(peerId, shouldCreateOffer = false) {
+    if (this.isCleanedUp) {
+      return null;
+    }
+
     try {
       console.log(`🔗 Creating peer connection with ${peerId}, shouldCreateOffer: ${shouldCreateOffer}`);
       
+      // Remove existing connection if any
+      this.removePeerConnection(peerId);
+      
       const peerConnection = new RTCPeerConnection({
-        iceServers: this.iceServers
+        iceServers: this.iceServers,
+        iceCandidatePoolSize: 10
       });
 
-      // Add local stream tracks
-      if (this.localStream) {
-        this.localStream.getTracks().forEach(track => {
-          peerConnection.addTrack(track, this.localStream);
-        });
-      }
+      // Set up connection state monitoring
+      peerConnection.onconnectionstatechange = () => {
+        console.log(`🔗 Connection state with ${peerId}:`, peerConnection.connectionState);
+        
+        switch (peerConnection.connectionState) {
+          case 'failed':
+            console.log(`🔄 Peer connection failed with ${peerId}, attempting to restart ICE`);
+            peerConnection.restartIce();
+            break;
+          case 'disconnected':
+            console.log(`❌ Peer disconnected: ${peerId}`);
+            setTimeout(() => {
+              if (peerConnection.connectionState === 'disconnected') {
+                this.removePeerConnection(peerId);
+              }
+            }, 5000);
+            break;
+          case 'closed':
+            console.log(`🚫 Peer connection closed: ${peerId}`);
+            this.removePeerConnection(peerId);
+            break;
+        }
+      };
+
+      // Handle ICE connection state changes
+      peerConnection.oniceconnectionstatechange = () => {
+        console.log(`🧊 ICE connection state with ${peerId}:`, peerConnection.iceConnectionState);
+        
+        if (peerConnection.iceConnectionState === 'failed') {
+          console.log(`🔄 ICE connection failed with ${peerId}, restarting ICE`);
+          peerConnection.restartIce();
+        }
+      };
 
       // Handle ICE candidates
       peerConnection.onicecandidate = (event) => {
-        if (event.candidate && this.socket) {
+        if (event.candidate && this.socket && !this.isCleanedUp) {
           this.socket.emit('ice-candidate', {
             targetId: peerId,
             candidate: event.candidate,
@@ -327,35 +487,20 @@ class WebRTCService {
 
       // Handle remote stream
       peerConnection.ontrack = (event) => {
+        if (this.isCleanedUp) return;
         console.log('📺 Received remote stream from:', peerId);
         const remoteStream = event.streams[0];
-        this.callbacks.onRemoteStream?.(peerId, remoteStream);
-      };
-
-      // Handle connection state changes
-      peerConnection.onconnectionstatechange = () => {
-        console.log(`🔗 Connection state with ${peerId}:`, peerConnection.connectionState);
-        
-        if (peerConnection.connectionState === 'failed') {
-          console.log(`🔄 Peer connection failed with ${peerId}, attempting to restart ICE`);
-          peerConnection.restartIce();
-        }
-        
-        if (peerConnection.connectionState === 'disconnected') {
-          console.log(`❌ Peer disconnected: ${peerId}`);
-          // Don't automatically remove - might reconnect
-        }
-        
-        if (peerConnection.connectionState === 'closed') {
-          console.log(`🚫 Peer connection closed: ${peerId}`);
-          this.removePeerConnection(peerId);
+        if (remoteStream) {
+          this.callbacks.onRemoteStream?.(peerId, remoteStream);
         }
       };
 
-      // Handle ICE connection state changes
-      peerConnection.oniceconnectionstatechange = () => {
-        console.log(`🧊 ICE connection state with ${peerId}:`, peerConnection.iceConnectionState);
-      };
+      // Add local stream tracks if available
+      if (this.localStream) {
+        this.localStream.getTracks().forEach(track => {
+          peerConnection.addTrack(track, this.localStream);
+        });
+      }
 
       this.peers.set(peerId, peerConnection);
 
@@ -368,16 +513,21 @@ class WebRTCService {
     } catch (error) {
       console.error(`❌ Failed to create peer connection with ${peerId}:`, error);
       this.callbacks.onError?.(`Failed to connect to participant: ${error.message}`);
+      this.removePeerConnection(peerId);
       throw error;
     }
   }
 
   // Create and send offer
   async createOffer(peerId) {
+    if (this.isCleanedUp) {
+      return;
+    }
+
     try {
       const peerConnection = this.peers.get(peerId);
-      if (!peerConnection) {
-        throw new Error(`No peer connection found for ${peerId}`);
+      if (!peerConnection || peerConnection.connectionState === 'closed') {
+        throw new Error(`No valid peer connection found for ${peerId}`);
       }
 
       console.log(`📞 Creating offer for ${peerId}`);
@@ -389,11 +539,13 @@ class WebRTCService {
       
       await peerConnection.setLocalDescription(offer);
 
-      this.socket.emit('offer', {
-        targetId: peerId,
-        offer: offer,
-        roomId: this.roomId
-      });
+      if (this.socket && !this.isCleanedUp) {
+        this.socket.emit('offer', {
+          targetId: peerId,
+          offer: offer,
+          roomId: this.roomId
+        });
+      }
 
       console.log(`📞 Offer sent to ${peerId}`);
     } catch (error) {
@@ -404,13 +556,21 @@ class WebRTCService {
 
   // Handle incoming offer
   async handleOffer(data) {
+    if (this.isCleanedUp) {
+      return;
+    }
+
     try {
       const { fromId, offer } = data;
       console.log(`📞 Handling offer from ${fromId}`);
 
       let peerConnection = this.peers.get(fromId);
-      if (!peerConnection) {
+      if (!peerConnection || peerConnection.connectionState === 'closed') {
         peerConnection = await this.createPeerConnection(fromId, false);
+      }
+
+      if (!peerConnection) {
+        throw new Error('Failed to create peer connection');
       }
 
       await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
@@ -418,11 +578,13 @@ class WebRTCService {
       const answer = await peerConnection.createAnswer();
       await peerConnection.setLocalDescription(answer);
 
-      this.socket.emit('answer', {
-        targetId: fromId,
-        answer: answer,
-        roomId: this.roomId
-      });
+      if (this.socket && !this.isCleanedUp) {
+        this.socket.emit('answer', {
+          targetId: fromId,
+          answer: answer,
+          roomId: this.roomId
+        });
+      }
 
       console.log(`📱 Answer sent to ${fromId}`);
     } catch (error) {
@@ -433,13 +595,17 @@ class WebRTCService {
 
   // Handle incoming answer
   async handleAnswer(data) {
+    if (this.isCleanedUp) {
+      return;
+    }
+
     try {
       const { fromId, answer } = data;
       console.log(`📱 Handling answer from ${fromId}`);
 
       const peerConnection = this.peers.get(fromId);
-      if (!peerConnection) {
-        console.error(`❌ No peer connection found for ${fromId}`);
+      if (!peerConnection || peerConnection.connectionState === 'closed') {
+        console.error(`❌ No valid peer connection found for ${fromId}`);
         return;
       }
 
@@ -453,11 +619,15 @@ class WebRTCService {
 
   // Handle ICE candidate
   async handleIceCandidate(data) {
+    if (this.isCleanedUp) {
+      return;
+    }
+
     try {
       const { fromId, candidate } = data;
       const peerConnection = this.peers.get(fromId);
       
-      if (peerConnection && candidate) {
+      if (peerConnection && peerConnection.connectionState !== 'closed' && candidate) {
         await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
       }
     } catch (error) {
@@ -465,46 +635,80 @@ class WebRTCService {
     }
   }
 
-  // Remove peer connection
+  // Remove peer connection with proper cleanup
   removePeerConnection(peerId) {
     const peerConnection = this.peers.get(peerId);
     if (peerConnection) {
-      peerConnection.close();
+      try {
+        peerConnection.close();
+      } catch (error) {
+        console.error(`Error closing peer connection for ${peerId}:`, error);
+      }
       this.peers.delete(peerId);
       console.log(`🗑️ Removed peer connection: ${peerId}`);
     }
   }
 
-  // Toggle audio
+  // Toggle audio with error handling
   toggleAudio() {
-    if (this.localStream) {
-      const audioTrack = this.localStream.getAudioTracks()[0];
-      if (audioTrack) {
-        audioTrack.enabled = !audioTrack.enabled;
-        this.broadcastMediaState();
-        return audioTrack.enabled;
-      }
+    if (this.isCleanedUp) {
+      return false;
     }
-    return false;
+
+    try {
+      if (this.localStream) {
+        const audioTrack = this.localStream.getAudioTracks()[0];
+        if (audioTrack) {
+          audioTrack.enabled = !audioTrack.enabled;
+          this.broadcastMediaState();
+          return audioTrack.enabled;
+        }
+      }
+      return false;
+    } catch (error) {
+      console.error('Error toggling audio:', error);
+      this.callbacks.onError?.('Failed to toggle audio');
+      return false;
+    }
   }
 
-  // Toggle video
+  // Toggle video with error handling
   toggleVideo() {
-    if (this.localStream) {
-      const videoTrack = this.localStream.getVideoTracks()[0];
-      if (videoTrack) {
-        videoTrack.enabled = !videoTrack.enabled;
-        this.broadcastMediaState();
-        return videoTrack.enabled;
-      }
+    if (this.isCleanedUp) {
+      return false;
     }
-    return false;
+
+    try {
+      if (this.localStream) {
+        const videoTrack = this.localStream.getVideoTracks()[0];
+        if (videoTrack) {
+          videoTrack.enabled = !videoTrack.enabled;
+          this.broadcastMediaState();
+          return videoTrack.enabled;
+        }
+      }
+      return false;
+    } catch (error) {
+      console.error('Error toggling video:', error);
+      this.callbacks.onError?.('Failed to toggle video');
+      return false;
+    }
   }
 
-  // Start screen sharing
+  // Start screen sharing with comprehensive error handling
   async startScreenShare() {
+    if (this.isCleanedUp) {
+      throw new Error('WebRTC service has been cleaned up');
+    }
+
     try {
       console.log('🖥️ Starting screen share...');
+      
+      // Stop existing screen stream
+      if (this.screenStream) {
+        this.screenStream.getTracks().forEach(track => track.stop());
+        this.screenStream = null;
+      }
       
       this.screenStream = await navigator.mediaDevices.getDisplayMedia({
         video: { 
@@ -513,24 +717,38 @@ class WebRTCService {
           height: { ideal: 1080, max: 1080 },
           frameRate: { ideal: 30, max: 60 }
         },
-        audio: true
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
       });
 
       // Replace video track in all peer connections
       const videoTrack = this.screenStream.getVideoTracks()[0];
+      const promises = [];
+      
       this.peers.forEach((peer) => {
-        const sender = peer.getSenders().find(s => s.track?.kind === 'video');
-        if (sender) {
-          sender.replaceTrack(videoTrack);
+        if (peer.connectionState !== 'closed') {
+          const sender = peer.getSenders().find(s => s.track?.kind === 'video');
+          if (sender) {
+            promises.push(sender.replaceTrack(videoTrack).catch(error => {
+              console.error('Failed to replace video track with screen share:', error);
+            }));
+          }
         }
       });
+
+      await Promise.all(promises);
 
       // Handle screen share end
       videoTrack.onended = () => {
         this.stopScreenShare();
       };
 
-      this.socket.emit('start-screen-share', { roomId: this.roomId });
+      if (this.socket && !this.isCleanedUp) {
+        this.socket.emit('start-screen-share', { roomId: this.roomId });
+      }
       
       console.log('✅ Screen share started');
       return this.screenStream;
@@ -543,6 +761,10 @@ class WebRTCService {
 
   // Stop screen sharing
   async stopScreenShare() {
+    if (this.isCleanedUp) {
+      return;
+    }
+
     try {
       console.log('🖥️ Stopping screen share...');
       
@@ -554,15 +776,25 @@ class WebRTCService {
       // Replace back to camera video
       if (this.localStream) {
         const videoTrack = this.localStream.getVideoTracks()[0];
+        const promises = [];
+        
         this.peers.forEach((peer) => {
-          const sender = peer.getSenders().find(s => s.track?.kind === 'video');
-          if (sender && videoTrack) {
-            sender.replaceTrack(videoTrack);
+          if (peer.connectionState !== 'closed') {
+            const sender = peer.getSenders().find(s => s.track?.kind === 'video');
+            if (sender && videoTrack) {
+              promises.push(sender.replaceTrack(videoTrack).catch(error => {
+                console.error('Failed to replace screen share with camera:', error);
+              }));
+            }
           }
         });
+
+        await Promise.all(promises);
       }
 
-      this.socket.emit('stop-screen-share', { roomId: this.roomId });
+      if (this.socket && !this.isCleanedUp) {
+        this.socket.emit('stop-screen-share', { roomId: this.roomId });
+      }
       
       console.log('✅ Screen share stopped');
     } catch (error) {
@@ -571,33 +803,51 @@ class WebRTCService {
     }
   }
 
-  // Send chat message
+  // Send chat message with validation
   sendChatMessage(message) {
+    if (this.isCleanedUp) {
+      return;
+    }
+
+    if (!message || typeof message !== 'string') {
+      console.error('Invalid chat message');
+      return;
+    }
+
+    const sanitizedMessage = message.trim();
+    if (!sanitizedMessage) {
+      return;
+    }
+
     if (this.socket && this.roomId) {
       this.socket.emit('chat-message', {
         roomId: this.roomId,
-        message
+        message: sanitizedMessage
       });
     }
   }
 
   // Broadcast media state
   broadcastMediaState() {
-    if (!this.socket || !this.roomId || !this.localStream) return;
+    if (!this.socket || !this.roomId || !this.localStream || this.isCleanedUp) return;
 
-    const audioTrack = this.localStream.getAudioTracks()[0];
-    const videoTrack = this.localStream.getVideoTracks()[0];
+    try {
+      const audioTrack = this.localStream.getAudioTracks()[0];
+      const videoTrack = this.localStream.getVideoTracks()[0];
 
-    const mediaState = {
-      audio: audioTrack ? audioTrack.enabled : false,
-      video: videoTrack ? videoTrack.enabled : false,
-      screenShare: !!this.screenStream
-    };
+      const mediaState = {
+        audio: audioTrack ? audioTrack.enabled : false,
+        video: videoTrack ? videoTrack.enabled : false,
+        screenShare: !!this.screenStream
+      };
 
-    this.socket.emit('media-state-update', {
-      roomId: this.roomId,
-      mediaState
-    });
+      this.socket.emit('media-state-update', {
+        roomId: this.roomId,
+        mediaState
+      });
+    } catch (error) {
+      console.error('Error broadcasting media state:', error);
+    }
   }
 
   // Handle reconnection
@@ -616,56 +866,127 @@ class WebRTCService {
 
   // Get current media state
   getMediaState() {
-    if (!this.localStream) {
+    if (!this.localStream || this.isCleanedUp) {
       return { audio: false, video: false, screenShare: false };
     }
 
-    const audioTrack = this.localStream.getAudioTracks()[0];
-    const videoTrack = this.localStream.getVideoTracks()[0];
+    try {
+      const audioTrack = this.localStream.getAudioTracks()[0];
+      const videoTrack = this.localStream.getVideoTracks()[0];
 
-    return {
-      audio: audioTrack ? audioTrack.enabled : false,
-      video: videoTrack ? videoTrack.enabled : false,
-      screenShare: !!this.screenStream
-    };
+      return {
+        audio: audioTrack ? audioTrack.enabled : false,
+        video: videoTrack ? videoTrack.enabled : false,
+        screenShare: !!this.screenStream
+      };
+    } catch (error) {
+      console.error('Error getting media state:', error);
+      return { audio: false, video: false, screenShare: false };
+    }
   }
 
-  // Set callback functions
-  onJoinedRoom(callback) { this.callbacks.onJoinedRoom = callback; }
-  onUserJoined(callback) { this.callbacks.onUserJoined = callback; }
-  onUserLeft(callback) { this.callbacks.onUserLeft = callback; }
-  onRemoteStream(callback) { this.callbacks.onRemoteStream = callback; }
-  onChatMessage(callback) { this.callbacks.onChatMessage = callback; }
-  onConnectionStateChange(callback) { this.callbacks.onConnectionStateChange = callback; }
-  onError(callback) { this.callbacks.onError = callback; }
-  onMediaStateUpdate(callback) { this.callbacks.onMediaStateUpdate = callback; }
-  onScreenShareStart(callback) { this.callbacks.onScreenShareStart = callback; }
-  onScreenShareStop(callback) { this.callbacks.onScreenShareStop = callback; }
-  onHostChanged(callback) { this.callbacks.onHostChanged = callback; }
+  // Set callback functions with validation
+  onJoinedRoom(callback) { 
+    if (typeof callback === 'function') this.callbacks.onJoinedRoom = callback; 
+  }
+  onUserJoined(callback) { 
+    if (typeof callback === 'function') this.callbacks.onUserJoined = callback; 
+  }
+  onUserLeft(callback) { 
+    if (typeof callback === 'function') this.callbacks.onUserLeft = callback; 
+  }
+  onRemoteStream(callback) { 
+    if (typeof callback === 'function') this.callbacks.onRemoteStream = callback; 
+  }
+  onChatMessage(callback) { 
+    if (typeof callback === 'function') this.callbacks.onChatMessage = callback; 
+  }
+  onConnectionStateChange(callback) { 
+    if (typeof callback === 'function') this.callbacks.onConnectionStateChange = callback; 
+  }
+  onError(callback) { 
+    if (typeof callback === 'function') this.callbacks.onError = callback; 
+  }
+  onMediaStateUpdate(callback) { 
+    if (typeof callback === 'function') this.callbacks.onMediaStateUpdate = callback; 
+  }
+  onScreenShareStart(callback) { 
+    if (typeof callback === 'function') this.callbacks.onScreenShareStart = callback; 
+  }
+  onScreenShareStop(callback) { 
+    if (typeof callback === 'function') this.callbacks.onScreenShareStop = callback; 
+  }
+  onHostChanged(callback) { 
+    if (typeof callback === 'function') this.callbacks.onHostChanged = callback; 
+  }
 
-  // Cleanup
+  // Comprehensive cleanup
   disconnect() {
+    if (this.isCleanedUp) {
+      return;
+    }
+
     console.log('🧹 Cleaning up WebRTC service...');
+    this.isCleanedUp = true;
     
+    // Clear timeouts and intervals
+    if (this.connectionTimeout) {
+      clearTimeout(this.connectionTimeout);
+      this.connectionTimeout = null;
+    }
+
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
+    }
+    
+    // Leave room
     this.leaveRoom();
     
+    // Stop all media streams
     if (this.localStream) {
-      this.localStream.getTracks().forEach(track => track.stop());
+      this.localStream.getTracks().forEach(track => {
+        try {
+          track.stop();
+        } catch (error) {
+          console.error('Error stopping track:', error);
+        }
+      });
       this.localStream = null;
     }
     
     if (this.screenStream) {
-      this.screenStream.getTracks().forEach(track => track.stop());
+      this.screenStream.getTracks().forEach(track => {
+        try {
+          track.stop();
+        } catch (error) {
+          console.error('Error stopping screen track:', error);
+        }
+      });
       this.screenStream = null;
     }
     
+    // Close all peer connections
+    this.peers.forEach((peer, peerId) => {
+      this.removePeerConnection(peerId);
+    });
+    
+    // Disconnect socket
     if (this.socket) {
+      this.socket.removeAllListeners();
       this.socket.disconnect();
       this.socket = null;
     }
     
+    // Clear state
     this.isConnected = false;
     this.roomId = null;
+    this.reconnectAttempts = 0;
+    
+    // Clear callbacks to prevent memory leaks
+    Object.keys(this.callbacks).forEach(key => {
+      this.callbacks[key] = null;
+    });
     
     console.log('✅ WebRTC service cleaned up');
   }
