@@ -1,198 +1,301 @@
 const express = require('express');
 const http = require('http');
-const WebSocket = require('ws');
+const socketIo = require('socket.io');
 const cors = require('cors');
+const { v4: uuidv4 } = require('uuid');
 require('dotenv').config();
 
 const app = express();
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
+const io = socketIo(server, {
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"]
+  }
+});
 
 // Enable CORS
 app.use(cors());
 app.use(express.json());
 
-// Store connected clients
-const clients = new Map();
+// Store rooms and participants
 const rooms = new Map();
+const participants = new Map();
 
 // Health check endpoint
 app.get('/', (req, res) => {
   res.json({ 
     message: 'CodarMeet Signaling Server is running',
     timestamp: new Date().toISOString(),
-    connectedClients: clients.size,
-    activeRooms: rooms.size
+    connectedClients: io.engine.clientsCount,
+    activeRooms: rooms.size,
+    totalParticipants: participants.size
   });
 });
 
-// WebSocket connection handling
-wss.on('connection', (ws, req) => {
-  const clientId = generateClientId();
-  clients.set(clientId, {
-    ws,
-    roomId: null,
-    userId: null
-  });
-
-  console.log(`Client connected: ${clientId}`);
-
-  // Send welcome message
-  ws.send(JSON.stringify({
-    type: 'welcome',
-    clientId: clientId
-  }));
-
-  ws.on('message', (message) => {
-    try {
-      const data = JSON.parse(message);
-      handleMessage(clientId, data);
-    } catch (error) {
-      console.error('Error parsing message:', error);
-    }
-  });
-
-  ws.on('close', () => {
-    handleClientDisconnect(clientId);
-  });
-
-  ws.on('error', (error) => {
-    console.error(`WebSocket error for client ${clientId}:`, error);
-    handleClientDisconnect(clientId);
-  });
-});
-
-function handleMessage(clientId, data) {
-  const client = clients.get(clientId);
-  if (!client) return;
-
-  switch (data.type) {
-    case 'join-room':
-      handleJoinRoom(clientId, data);
-      break;
-    case 'leave-room':
-      handleLeaveRoom(clientId);
-      break;
-    case 'offer':
-    case 'answer':
-    case 'ice-candidate':
-      handleWebRTCMessage(clientId, data);
-      break;
-    case 'chat-message':
-      handleChatMessage(clientId, data);
-      break;
-    default:
-      console.log(`Unknown message type: ${data.type}`);
-  }
-}
-
-function handleJoinRoom(clientId, data) {
-  const client = clients.get(clientId);
-  const { roomId, userId } = data;
-
-  // Leave previous room if any
-  if (client.roomId) {
-    handleLeaveRoom(clientId);
-  }
-
-  // Join new room
-  client.roomId = roomId;
-  client.userId = userId;
-
-  if (!rooms.has(roomId)) {
-    rooms.set(roomId, new Set());
-  }
-  rooms.get(roomId).add(clientId);
-
-  // Notify others in the room
-  broadcastToRoom(roomId, {
-    type: 'user-joined',
-    userId: userId,
-    clientId: clientId
-  }, clientId);
-
-  console.log(`Client ${clientId} joined room ${roomId}`);
-}
-
-function handleLeaveRoom(clientId) {
-  const client = clients.get(clientId);
-  if (!client || !client.roomId) return;
-
-  const roomId = client.roomId;
+// Get room info endpoint
+app.get('/room/:roomId', (req, res) => {
+  const { roomId } = req.params;
   const room = rooms.get(roomId);
   
-  if (room) {
-    room.delete(clientId);
-    if (room.size === 0) {
-      rooms.delete(roomId);
-    } else {
-      // Notify others in the room
-      broadcastToRoom(roomId, {
-        type: 'user-left',
-        userId: client.userId,
-        clientId: clientId
-      }, clientId);
-    }
+  if (!room) {
+    return res.status(404).json({ error: 'Room not found' });
   }
+  
+  res.json({
+    roomId,
+    participants: Array.from(room.participants.values()),
+    createdAt: room.createdAt,
+    isActive: room.isActive
+  });
+});
 
-  client.roomId = null;
-  client.userId = null;
-
-  console.log(`Client ${clientId} left room ${roomId}`);
-}
-
-function handleWebRTCMessage(clientId, data) {
-  const client = clients.get(clientId);
-  if (!client || !client.roomId) return;
-
-  // Forward WebRTC messages to other clients in the room
-  broadcastToRoom(client.roomId, {
-    ...data,
-    from: clientId
-  }, clientId);
-}
-
-function handleChatMessage(clientId, data) {
-  const client = clients.get(clientId);
-  if (!client || !client.roomId) return;
-
-  // Broadcast chat message to all clients in the room
-  broadcastToRoom(client.roomId, {
-    type: 'chat-message',
-    message: data.message,
-    userId: client.userId,
+// Socket.IO connection handling
+io.on('connection', (socket) => {
+  console.log(`Client connected: ${socket.id}`);
+  
+  // Send welcome message with client ID
+  socket.emit('welcome', { 
+    clientId: socket.id,
     timestamp: new Date().toISOString()
   });
-}
 
-function handleClientDisconnect(clientId) {
-  handleLeaveRoom(clientId);
-  clients.delete(clientId);
-  console.log(`Client disconnected: ${clientId}`);
-}
+  // Handle joining a room
+  socket.on('join-room', (data) => {
+    const { roomId, username, email } = data;
+    
+    if (!roomId || !username) {
+      socket.emit('error', { message: 'Room ID and username are required' });
+      return;
+    }
 
-function broadcastToRoom(roomId, message, excludeClientId = null) {
-  const room = rooms.get(roomId);
-  if (!room) return;
+    // Leave previous room if any
+    if (socket.roomId) {
+      handleLeaveRoom(socket);
+    }
 
-  room.forEach(clientId => {
-    if (clientId !== excludeClientId) {
-      const client = clients.get(clientId);
-      if (client && client.ws.readyState === WebSocket.OPEN) {
-        client.ws.send(JSON.stringify(message));
-      }
+    // Join new room
+    socket.join(roomId);
+    socket.roomId = roomId;
+    socket.username = username;
+    socket.email = email;
+
+    // Create room if it doesn't exist
+    if (!rooms.has(roomId)) {
+      rooms.set(roomId, {
+        id: roomId,
+        participants: new Map(),
+        createdAt: new Date(),
+        isActive: true
+      });
+    }
+
+    const room = rooms.get(roomId);
+    const participant = {
+      id: socket.id,
+      username,
+      email,
+      joinedAt: new Date(),
+      isHost: room.participants.size === 0
+    };
+
+    room.participants.set(socket.id, participant);
+    participants.set(socket.id, { roomId, participant });
+
+    // Notify the joining user about the room
+    socket.emit('room-joined', {
+      roomId,
+      clientId: socket.id,
+      participants: Array.from(room.participants.values()),
+      isHost: participant.isHost
+    });
+
+    // Notify other participants in the room
+    socket.to(roomId).emit('participant-joined', participant);
+
+    console.log(`Client ${socket.id} (${username}) joined room ${roomId}`);
+    console.log(`Room ${roomId} now has ${room.participants.size} participants`);
+  });
+
+  // Handle WebRTC signaling
+  socket.on('offer', (data) => {
+    const { targetId, offer } = data;
+    socket.to(targetId).emit('offer', {
+      from: socket.id,
+      offer
+    });
+  });
+
+  socket.on('answer', (data) => {
+    const { targetId, answer } = data;
+    socket.to(targetId).emit('answer', {
+      from: socket.id,
+      answer
+    });
+  });
+
+  socket.on('ice-candidate', (data) => {
+    const { targetId, candidate } = data;
+    socket.to(targetId).emit('ice-candidate', {
+      from: socket.id,
+      candidate
+    });
+  });
+
+  // Handle chat messages
+  socket.on('chat-message', (data) => {
+    const { text } = data;
+    const participant = participants.get(socket.id);
+    
+    if (!participant) return;
+
+    const message = {
+      id: uuidv4(),
+      text,
+      sender: participant.participant.username,
+      senderId: socket.id,
+      timestamp: new Date().toISOString(),
+      roomId: participant.roomId
+    };
+
+    // Broadcast to all participants in the room
+    io.to(participant.roomId).emit('chat-message', message);
+  });
+
+  // Handle screen sharing
+  socket.on('screen-share-started', () => {
+    const participant = participants.get(socket.id);
+    if (participant) {
+      socket.to(participant.roomId).emit('screen-share-started', {
+        from: socket.id,
+        username: participant.participant.username
+      });
     }
   });
+
+  socket.on('screen-share-stopped', () => {
+    const participant = participants.get(socket.id);
+    if (participant) {
+      socket.to(participant.roomId).emit('screen-share-stopped', {
+        from: socket.id,
+        username: participant.participant.username
+      });
+    }
+  });
+
+  // Handle recording
+  socket.on('recording-started', () => {
+    const participant = participants.get(socket.id);
+    if (participant) {
+      socket.to(participant.roomId).emit('recording-started', {
+        from: socket.id,
+        username: participant.participant.username
+      });
+    }
+  });
+
+  socket.on('recording-stopped', () => {
+    const participant = participants.get(socket.id);
+    if (participant) {
+      socket.to(participant.roomId).emit('recording-stopped', {
+        from: socket.id,
+        username: participant.participant.username
+      });
+    }
+  });
+
+  // Handle participant actions (mute/unmute, video on/off)
+  socket.on('participant-action', (data) => {
+    const { action, value } = data;
+    const participant = participants.get(socket.id);
+    
+    if (participant) {
+      socket.to(participant.roomId).emit('participant-action', {
+        from: socket.id,
+        action,
+        value,
+        username: participant.participant.username
+      });
+    }
+  });
+
+  // Handle room management
+  socket.on('leave-room', () => {
+    handleLeaveRoom(socket);
+  });
+
+  socket.on('disconnect', () => {
+    handleLeaveRoom(socket);
+    participants.delete(socket.id);
+    console.log(`Client disconnected: ${socket.id}`);
+  });
+
+  // Handle errors
+  socket.on('error', (error) => {
+    console.error(`Socket error for ${socket.id}:`, error);
+    socket.emit('error', { message: 'An error occurred' });
+  });
+});
+
+function handleLeaveRoom(socket) {
+  if (!socket.roomId) return;
+
+  const room = rooms.get(socket.roomId);
+  if (!room) return;
+
+  const participant = room.participants.get(socket.id);
+  if (!participant) return;
+
+  // Remove participant from room
+  room.participants.delete(socket.id);
+  participants.delete(socket.id);
+
+  // Notify other participants
+  socket.to(socket.roomId).emit('participant-left', {
+    participantId: socket.id,
+    username: participant.username
+  });
+
+  // If room is empty, mark it as inactive
+  if (room.participants.size === 0) {
+    room.isActive = false;
+    // Optionally delete the room after some time
+    setTimeout(() => {
+      if (rooms.has(socket.roomId) && rooms.get(socket.roomId).participants.size === 0) {
+        rooms.delete(socket.roomId);
+        console.log(`Room ${socket.roomId} deleted (empty)`);
+      }
+    }, 300000); // 5 minutes
+  }
+
+  socket.leave(socket.roomId);
+  socket.roomId = null;
+  socket.username = null;
+  socket.email = null;
+
+  console.log(`Client ${socket.id} left room ${socket.roomId}`);
+  console.log(`Room ${socket.roomId} now has ${room.participants.size} participants`);
 }
 
-function generateClientId() {
-  return Math.random().toString(36).substr(2, 9);
-}
+// Cleanup inactive rooms periodically
+setInterval(() => {
+  const now = new Date();
+  for (const [roomId, room] of rooms.entries()) {
+    if (!room.isActive && room.participants.size === 0) {
+      const timeSinceLastActivity = now - room.createdAt;
+      if (timeSinceLastActivity > 3600000) { // 1 hour
+        rooms.delete(roomId);
+        console.log(`Cleaned up inactive room: ${roomId}`);
+      }
+    }
+  }
+}, 300000); // Check every 5 minutes
 
-const PORT = process.env.SIGNALING_SERVER_PORT || 3002;
+const PORT = process.env.PORT || 3002;
 
 server.listen(PORT, () => {
   console.log(`🚀 CodarMeet Signaling Server running on port ${PORT}`);
-  console.log(`📡 WebSocket server started`);
+  console.log(`📡 Socket.IO server started`);
   console.log(`🌐 Health check: http://localhost:${PORT}/`);
+  console.log(`📊 Active rooms: ${rooms.size}`);
 }); 
