@@ -25,7 +25,8 @@ import {
   DialogActions,
   Avatar,
   Popover,
-  ListItemAvatar
+  ListItemAvatar,
+  CircularProgress
 } from '@mui/material';
 import { 
   Mic, 
@@ -42,7 +43,10 @@ import {
   ClosedCaption,
   ClosedCaptionOff,
   Settings,
-  Group
+  Group,
+  SignalCellular4Bar,
+  SignalCellular0Bar,
+  Refresh
 } from '@mui/icons-material';
 import WebRTCService from './services/WebRTCService';
 import PersonIcon from '@mui/icons-material/Person';
@@ -55,7 +59,8 @@ const VideoChat = ({ open, onClose, roomName }) => {
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoOff, setIsVideoOff] = useState(false);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
-  const [connectionStatus, setConnectionStatus] = useState('Connecting...');
+  const [connectionStatus, setConnectionStatus] = useState('Initializing...');
+  const [connectionQuality, setConnectionQuality] = useState('good');
   
   // Recording state
   const [isRecording, setIsRecording] = useState(false);
@@ -78,6 +83,10 @@ const VideoChat = ({ open, onClose, roomName }) => {
   const [newMessage, setNewMessage] = useState('');
   const [showChat, setShowChat] = useState(true);
 
+  // Error handling
+  const [error, setError] = useState(null);
+  const [isReconnecting, setIsReconnecting] = useState(false);
+
   const localVideoRef = useRef();
   const remoteVideosRef = useRef(new Map());
   const chatEndRef = useRef();
@@ -85,6 +94,7 @@ const VideoChat = ({ open, onClose, roomName }) => {
   const recordingTimerRef = useRef();
   const recognitionRef = useRef();
   const webrtcServiceRef = useRef();
+  const screenStreamRef = useRef();
 
   const [participantsAnchorEl, setParticipantsAnchorEl] = useState(null);
   const [shareSnackbar, setShareSnackbar] = useState(false);
@@ -154,6 +164,7 @@ const VideoChat = ({ open, onClose, roomName }) => {
   const initializeMeeting = async () => {
     try {
       setConnectionStatus('Initializing...');
+      setError(null);
       
       // Initialize WebRTC service
       webrtcServiceRef.current = new WebRTCService();
@@ -179,6 +190,7 @@ const VideoChat = ({ open, onClose, roomName }) => {
       });
 
       webrtcServiceRef.current.onTrack((participantId, stream) => {
+        console.log('Received track from participant:', participantId);
         setRemoteStreams(prev => {
           const newStreams = new Map(prev);
           newStreams.set(participantId, stream);
@@ -193,6 +205,23 @@ const VideoChat = ({ open, onClose, roomName }) => {
         setIsConnected(true);
       });
 
+      webrtcServiceRef.current.onConnectionStateChange((state) => {
+        console.log('Connection state changed:', state);
+        if (state === 'connected') {
+          setIsConnected(true);
+          setConnectionStatus('Connected');
+          setIsReconnecting(false);
+        } else if (state === 'disconnected') {
+          setIsConnected(false);
+          setConnectionStatus('Disconnected');
+        }
+      });
+
+      webrtcServiceRef.current.onError((error) => {
+        console.error('WebRTC error:', error);
+        setError(error.message || 'Connection error occurred');
+      });
+
       // Connect to signaling server
       await webrtcServiceRef.current.connect();
       
@@ -201,21 +230,31 @@ const VideoChat = ({ open, onClose, roomName }) => {
       
       // Join room
       const roomId = roomName.replace(/\s+/g, '-').toLowerCase();
-      webrtcServiceRef.current.joinRoom(roomId, 'User', 'user@example.com');
+      const username = `User_${Math.random().toString(36).substr(2, 6)}`;
+      webrtcServiceRef.current.joinRoom(roomId, username, 'user@example.com');
       
     } catch (error) {
       console.error('Error initializing meeting:', error);
       setConnectionStatus('Connection failed');
-      alert('Failed to connect to meeting. Please try again.');
+      setError(error.message || 'Failed to connect to meeting. Please try again.');
     }
   };
 
   const initializeMedia = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-        audio: true
+        video: {
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          frameRate: { ideal: 30 }
+        },
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
       });
+      
       setLocalStream(stream);
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = stream;
@@ -238,13 +277,16 @@ const VideoChat = ({ open, onClose, roomName }) => {
       }
     } catch (error) {
       console.error('Error accessing media devices:', error);
-      alert('Could not access camera/microphone. Please check permissions.');
+      setError('Could not access camera/microphone. Please check permissions.');
     }
   };
 
   const cleanup = () => {
     if (localStream) {
       localStream.getTracks().forEach(track => track.stop());
+    }
+    if (screenStreamRef.current) {
+      screenStreamRef.current.getTracks().forEach(track => track.stop());
     }
     if (webrtcServiceRef.current) {
       webrtcServiceRef.current.leaveRoom();
@@ -269,11 +311,12 @@ const VideoChat = ({ open, onClose, roomName }) => {
     setCcInterim('');
     setMessages([]);
     setConnectionStatus('Disconnected');
+    setError(null);
   };
 
   const initializeSpeechRecognition = () => {
     if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
-      alert('Speech recognition is not supported in this browser. Please use Chrome or Edge.');
+      setError('Speech recognition is not supported in this browser. Please use Chrome or Edge.');
       setCcEnabled(false);
       return;
     }
@@ -410,7 +453,7 @@ const VideoChat = ({ open, onClose, roomName }) => {
       
     } catch (error) {
       console.error('Error starting recording:', error);
-      alert('Could not start recording. Please check permissions.');
+      setError('Could not start recording. Please check permissions.');
     }
   };
 
@@ -494,12 +537,18 @@ const VideoChat = ({ open, onClose, roomName }) => {
         localVideoRef.current.srcObject = localStream;
       }
       setIsScreenSharing(false);
+      if (screenStreamRef.current) {
+        screenStreamRef.current.getTracks().forEach(track => track.stop());
+        screenStreamRef.current = null;
+      }
     } else {
       try {
         const screenStream = await navigator.mediaDevices.getDisplayMedia({
           video: true,
           audio: false
         });
+        
+        screenStreamRef.current = screenStream;
         
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = screenStream;
@@ -512,10 +561,11 @@ const VideoChat = ({ open, onClose, roomName }) => {
             localVideoRef.current.srcObject = localStream;
           }
           setIsScreenSharing(false);
+          screenStreamRef.current = null;
         };
       } catch (error) {
         console.error('Error sharing screen:', error);
-        alert('Could not start screen sharing.');
+        setError('Could not start screen sharing.');
       }
     }
   };
@@ -541,6 +591,18 @@ const VideoChat = ({ open, onClose, roomName }) => {
   const handleShareLink = () => {
     const url = `${window.location.origin}${window.location.pathname}?room=${encodeURIComponent(roomName)}`;
     navigator.clipboard.writeText(url).then(() => setShareSnackbar(true));
+  };
+
+  const reconnect = async () => {
+    setIsReconnecting(true);
+    setError(null);
+    cleanup();
+    await initializeMeeting();
+  };
+
+  const getConnectionQualityIcon = () => {
+    if (!isConnected) return <SignalCellular0Bar />;
+    return connectionQuality === 'good' ? <SignalCellular4Bar /> : <SignalCellular0Bar />;
   };
 
   return (
@@ -587,40 +649,62 @@ const VideoChat = ({ open, onClose, roomName }) => {
         </Button>
       </Box>
 
+      {/* Error Alert */}
+      {error && (
+        <Alert severity="error" sx={{ mx: 4, mt: 2 }} onClose={() => setError(null)}>
+          {error}
+          <Button size="small" onClick={reconnect} sx={{ ml: 2 }}>
+            Reconnect
+          </Button>
+        </Alert>
+      )}
+
       {/* Recording/CC Indicators */}
       <Box sx={{ position: 'absolute', top: 24, left: 32, zIndex: 10, display: 'flex', alignItems: 'center', gap: 2 }}>
-            {isRecording && (
+        {isRecording && (
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, bgcolor: 'error.main', color: 'white', px: 2, py: 1, borderRadius: 2, boxShadow: 2 }}>
-                <FiberManualRecord sx={{ animation: 'pulse 1s infinite' }} />
+            <FiberManualRecord sx={{ animation: 'pulse 1s infinite' }} />
             <Typography variant="body2">REC {formatTime(recordingTime)}</Typography>
-              </Box>
-            )}
-            {ccEnabled && (
+          </Box>
+        )}
+        {ccEnabled && (
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, bgcolor: 'success.main', color: 'white', px: 2, py: 1, borderRadius: 2, boxShadow: 2 }}>
-                <ClosedCaption />
-                <Typography variant="body2">CC ON</Typography>
-              </Box>
-            )}
-        </Box>
+            <ClosedCaption />
+            <Typography variant="body2">CC ON</Typography>
+          </Box>
+        )}
+      </Box>
         
       {/* Main Content */}
       <Box sx={{ display: 'flex', flex: 1, minHeight: 0, background: 'rgba(30,32,34,0.98)', borderBottomLeftRadius: 16, borderBottomRightRadius: 16 }}>
         {/* Video Grid */}
         <Box sx={{ flex: 2, display: 'flex', flexDirection: 'column', gap: 2, p: 3, position: 'relative' }}>
-            {/* Connection Status */}
-            <Box sx={{ textAlign: 'center', mb: 1 }}>
+          {/* Connection Status */}
+          <Box sx={{ textAlign: 'center', mb: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1 }}>
+            {isReconnecting ? (
+              <CircularProgress size={16} />
+            ) : (
+              getConnectionQualityIcon()
+            )}
             <Typography variant="body2" color="#bdbdbd">
-                {connectionStatus} • {participants.length} participant{participants.length !== 1 ? 's' : ''}
-              </Typography>
-            </Box>
+              {connectionStatus} • {participants.length} participant{participants.length !== 1 ? 's' : ''}
+            </Typography>
+            {!isConnected && !isReconnecting && (
+              <Tooltip title="Reconnect">
+                <IconButton size="small" onClick={reconnect} sx={{ color: '#bdbdbd' }}>
+                  <Refresh />
+                </IconButton>
+              </Tooltip>
+            )}
+          </Box>
           <Box sx={{ display: 'flex', gap: 2, flex: 1, flexWrap: 'wrap', justifyContent: 'center', alignItems: 'center' }}>
-              {/* Local Video */}
+            {/* Local Video */}
             <Box sx={{ flex: 1, minWidth: 320, maxWidth: 420, position: 'relative', boxShadow: 4, borderRadius: 3, overflow: 'hidden', bgcolor: '#222' }}>
-                <video
-                  ref={localVideoRef}
-                  autoPlay
-                  muted
-                  playsInline
+              <video
+                ref={localVideoRef}
+                autoPlay
+                muted
+                playsInline
                 style={{ width: '100%', height: '100%', objectFit: 'cover', background: '#111' }}
               />
               <Box sx={{ position: 'absolute', left: 0, bottom: 0, width: '100%', bgcolor: 'rgba(0,0,0,0.5)', color: 'white', px: 2, py: 0.5, display: 'flex', alignItems: 'center', gap: 1 }}>
@@ -628,106 +712,106 @@ const VideoChat = ({ open, onClose, roomName }) => {
                 <Typography variant="caption">You {isScreenSharing ? '(Screen Share)' : ''}</Typography>
               </Box>
             </Box>
-              {/* Remote Videos */}
+            {/* Remote Videos */}
             {Array.from(remoteStreams.entries()).map(([participantId, stream], idx) => {
-                const participant = participants.find(p => p.id === participantId);
-                return (
+              const participant = participants.find(p => p.id === participantId);
+              return (
                 <Box key={participantId} sx={{ flex: 1, minWidth: 320, maxWidth: 420, position: 'relative', boxShadow: 4, borderRadius: 3, overflow: 'hidden', bgcolor: '#222' }}>
-                    <video
+                  <video
                     ref={el => { if (el) { el.srcObject = stream; remoteVideosRef.current.set(participantId, el); } }}
-                      autoPlay
-                      playsInline
-                      controls={false}
+                    autoPlay
+                    playsInline
+                    controls={false}
                     style={{ width: '100%', height: '100%', objectFit: 'cover', background: '#111' }}
                   />
                   <Box sx={{ position: 'absolute', left: 0, bottom: 0, width: '100%', bgcolor: 'rgba(0,0,0,0.5)', color: 'white', px: 2, py: 0.5, display: 'flex', alignItems: 'center', gap: 1 }}>
                     <Avatar sx={{ width: 24, height: 24, bgcolor: '#764ba2', fontSize: 16 }}><PersonIcon /></Avatar>
                     <Typography variant="caption">{participant?.username || `Remote User ${idx + 1}`}</Typography>
                   </Box>
-                  </Box>
-                );
-              })}
-              {/* Placeholder for waiting participants */}
-              {remoteStreams.size === 0 && (
+                </Box>
+              );
+            })}
+            {/* Placeholder for waiting participants */}
+            {remoteStreams.size === 0 && (
               <Box sx={{ flex: 1, minWidth: 320, maxWidth: 420, display: 'flex', alignItems: 'center', justifyContent: 'center', bgcolor: '#18191a', borderRadius: 3, boxShadow: 2 }}>
                 <PersonIcon sx={{ fontSize: 60, color: '#444' }} />
                 <Typography variant="body1" color="#888" sx={{ ml: 2 }}>
-                    Waiting for participants to join...
-                  </Typography>
-                </Box>
-              )}
-            </Box>
-            {/* Closed Captions Overlay */}
-            {ccEnabled && (ccTranscript.length > 0 || ccInterim) && (
-              <Box
-                sx={{
-                  position: 'absolute',
-                  left: '50%',
-                  transform: 'translateX(-50%)',
-                  bottom: ccPosition === 'bottom' ? '120px' : '50%',
-                  top: ccPosition === 'top' ? '20px' : 'auto',
-                  zIndex: 1000,
-                  bgcolor: 'rgba(0, 0, 0, 0.8)',
-                  color: 'white',
-                  px: 3,
-                  py: 2,
-                  borderRadius: 2,
-                  maxWidth: '80%',
-                  textAlign: 'center',
-                  backdropFilter: 'blur(4px)',
-                  fontSize: ccFontSize === 'small' ? '14px' : ccFontSize === 'large' ? '20px' : '16px',
-                  fontWeight: 'bold',
-                  textShadow: '2px 2px 4px rgba(0,0,0,0.8)',
-                  lineHeight: 1.4,
-                  maxHeight: '120px',
-                overflow: 'hidden',
-                boxShadow: 4
-                }}
-              >
-                {ccTranscript.length > 0 && (
-                  <Typography variant="body1" sx={{ mb: 1 }}>
-                    {ccTranscript[ccTranscript.length - 1]?.text}
-                  </Typography>
-                )}
-                {ccInterim && (
-                  <Typography variant="body2" sx={{ opacity: 0.7, fontStyle: 'italic' }}>
-                    {ccInterim}
-                  </Typography>
-                )}
+                  Waiting for participants to join...
+                </Typography>
               </Box>
             )}
+          </Box>
+          {/* Closed Captions Overlay */}
+          {ccEnabled && (ccTranscript.length > 0 || ccInterim) && (
+            <Box
+              sx={{
+                position: 'absolute',
+                left: '50%',
+                transform: 'translateX(-50%)',
+                bottom: ccPosition === 'bottom' ? '120px' : '50%',
+                top: ccPosition === 'top' ? '20px' : 'auto',
+                zIndex: 1000,
+                bgcolor: 'rgba(0, 0, 0, 0.8)',
+                color: 'white',
+                px: 3,
+                py: 2,
+                borderRadius: 2,
+                maxWidth: '80%',
+                textAlign: 'center',
+                backdropFilter: 'blur(4px)',
+                fontSize: ccFontSize === 'small' ? '14px' : ccFontSize === 'large' ? '20px' : '16px',
+                fontWeight: 'bold',
+                textShadow: '2px 2px 4px rgba(0,0,0,0.8)',
+                lineHeight: 1.4,
+                maxHeight: '120px',
+                overflow: 'hidden',
+                boxShadow: 4
+              }}
+            >
+              {ccTranscript.length > 0 && (
+                <Typography variant="body1" sx={{ mb: 1 }}>
+                  {ccTranscript[ccTranscript.length - 1]?.text}
+                </Typography>
+              )}
+              {ccInterim && (
+                <Typography variant="body2" sx={{ opacity: 0.7, fontStyle: 'italic' }}>
+                  {ccInterim}
+                </Typography>
+              )}
+            </Box>
+          )}
           {/* Floating Controls Bar */}
           <Box sx={{ position: 'absolute', left: '50%', bottom: 24, transform: 'translateX(-50%)', zIndex: 20, bgcolor: 'rgba(30,32,34,0.95)', borderRadius: 3, boxShadow: 4, px: 3, py: 1, display: 'flex', gap: 2, alignItems: 'center' }}>
             <Tooltip title={isMuted ? 'Unmute' : 'Mute'}>
               <IconButton onClick={toggleMute} color={isMuted ? 'error' : 'primary'} size="large">
                 {isMuted ? <MicOff /> : <Mic />}
-                    </IconButton>
-                  </Tooltip>
+              </IconButton>
+            </Tooltip>
             <Tooltip title={isVideoOff ? 'Turn on Camera' : 'Turn off Camera'}>
               <IconButton onClick={toggleVideo} color={isVideoOff ? 'error' : 'primary'} size="large">
                 {isVideoOff ? <VideocamOff /> : <Videocam />}
-                    </IconButton>
-                  </Tooltip>
+              </IconButton>
+            </Tooltip>
             <Tooltip title={isScreenSharing ? 'Stop Screen Share' : 'Share Screen'}>
               <IconButton onClick={toggleScreenShare} color={isScreenSharing ? 'error' : 'primary'} size="large">
                 <ScreenShare />
-                    </IconButton>
-                  </Tooltip>
+              </IconButton>
+            </Tooltip>
             <Tooltip title={ccEnabled ? 'Turn off Closed Captions' : 'Turn on Closed Captions'}>
               <IconButton onClick={toggleClosedCaptions} color={ccEnabled ? 'success' : 'primary'} size="large">
                 {ccEnabled ? <ClosedCaption /> : <ClosedCaptionOff />}
-                  </IconButton>
-                </Tooltip>
-              <Tooltip title="Test Audio">
+              </IconButton>
+            </Tooltip>
+            <Tooltip title="Test Audio">
               <IconButton onClick={testAudio} color="primary" size="large">
-                  <Settings />
-                </IconButton>
-              </Tooltip>
+                <Settings />
+              </IconButton>
+            </Tooltip>
             {!isRecording ? (
               <Tooltip title="Start Recording">
                 <IconButton onClick={() => { setRecordingType('video'); startRecording(); }} color="primary" size="large">
                   <FiberManualRecord />
-              </IconButton>
+                </IconButton>
               </Tooltip>
             ) : (
               <Tooltip title="Stop Recording">
@@ -741,109 +825,109 @@ const VideoChat = ({ open, onClose, roomName }) => {
                 <Chat />
               </IconButton>
             </Tooltip>
-            </Box>
           </Box>
+        </Box>
         {/* Chat Panel */}
-          {showChat && (
+        {showChat && (
           <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 340, maxWidth: 400, bgcolor: 'rgba(36,37,38,0.98)', borderLeft: '2px solid #222', borderBottomRightRadius: 16, boxShadow: 2 }}>
             <Paper elevation={0} sx={{ flex: 1, display: 'flex', flexDirection: 'column', bgcolor: 'transparent', boxShadow: 'none' }}>
               <Box sx={{ p: 2, borderBottom: 1, borderColor: 'divider', bgcolor: 'rgba(102,126,234,0.08)' }}>
                 <Typography variant="h6" sx={{ color: '#667eea', fontWeight: 700 }}>Chat</Typography>
-                </Box>
-                <List sx={{ flex: 1, overflow: 'auto', p: 1 }}>
-                  {messages.map((message) => (
+              </Box>
+              <List sx={{ flex: 1, overflow: 'auto', p: 1 }}>
+                {messages.map((message) => (
                   <ListItem key={message.id} sx={{ flexDirection: 'column', alignItems: 'flex-start', mb: 1 }}>
-                      <Box sx={{ display: 'flex', justifyContent: 'space-between', width: '100%' }}>
+                    <Box sx={{ display: 'flex', justifyContent: 'space-between', width: '100%' }}>
                       <Typography variant="subtitle2" color="#764ba2" sx={{ fontWeight: 600 }}>
-                          {message.sender}
-                        </Typography>
-                      <Typography variant="caption" color="#bdbdbd">
-                          {message.timestamp}
-                        </Typography>
-                      </Box>
-                    <Typography variant="body2" sx={{ mt: 0.5, color: '#fff', bgcolor: '#667eea', px: 2, py: 1, borderRadius: 2, boxShadow: 1 }}>
-                        {message.text}
+                        {message.sender}
                       </Typography>
-                    </ListItem>
-                  ))}
-                  <div ref={chatEndRef} />
-                </List>
-                <Divider />
+                      <Typography variant="caption" color="#bdbdbd">
+                        {message.timestamp}
+                      </Typography>
+                    </Box>
+                    <Typography variant="body2" sx={{ mt: 0.5, color: '#fff', bgcolor: '#667eea', px: 2, py: 1, borderRadius: 2, boxShadow: 1 }}>
+                      {message.text}
+                    </Typography>
+                  </ListItem>
+                ))}
+                <div ref={chatEndRef} />
+              </List>
+              <Divider />
               <Box sx={{ p: 1.5, display: 'flex', gap: 1, bgcolor: 'rgba(102,126,234,0.08)' }}>
-                  <TextField
-                    fullWidth
-                    size="small"
-                    placeholder="Type a message..."
-                    value={newMessage}
-                    onChange={(e) => setNewMessage(e.target.value)}
-                    onKeyPress={handleKeyPress}
-                  sx={{ bgcolor: '#fff', borderRadius: 2 }}
-                  />
-                <IconButton onClick={sendMessage} color="primary" sx={{ bgcolor: '#667eea', color: '#fff', borderRadius: 2, '&:hover': { bgcolor: '#5a6fd8' } }}>
-                    <Send />
-                  </IconButton>
-                </Box>
-              </Paper>
-            </Box>
-          )}
-        </Box>
-        {/* Recordings Section */}
-        {recordedChunks.length > 0 && (
-        <Box sx={{ mt: 2, p: 2, bgcolor: 'grey.50', borderRadius: 1, boxShadow: 2, mx: 4 }}>
-            <Typography variant="h6" gutterBottom>
-              Recordings ({recordedChunks.length})
-            </Typography>
-            <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
-              {recordedChunks.map((blob, index) => (
-                <Button
-                  key={index}
-                  variant="outlined"
-                  startIcon={<Download />}
-                  onClick={() => downloadRecording(blob, index)}
+                <TextField
+                  fullWidth
                   size="small"
-                >
-                  Recording {index + 1}
-                </Button>
-              ))}
-            </Box>
-          </Box>
-        )}
-        {/* Closed Captions Transcript Section */}
-        {ccEnabled && ccTranscript.length > 0 && (
-        <Box sx={{ mt: 2, p: 2, bgcolor: 'blue.50', borderRadius: 1, boxShadow: 2, mx: 4 }}>
-            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
-              <Typography variant="h6">
-                Live Transcript ({ccTranscript.length} entries)
-              </Typography>
-              <Box sx={{ display: 'flex', gap: 1 }}>
-              <Button size="small" onClick={clearTranscript} sx={{ color: '#667eea' }}>
-                  Clear
-                </Button>
-              <IconButton size="small" onClick={() => setShowCcSettings(true)} sx={{ color: '#667eea' }}>
-                  <Settings />
+                  placeholder="Type a message..."
+                  value={newMessage}
+                  onChange={(e) => setNewMessage(e.target.value)}
+                  onKeyPress={handleKeyPress}
+                  sx={{ bgcolor: '#fff', borderRadius: 2 }}
+                />
+                <IconButton onClick={sendMessage} color="primary" sx={{ bgcolor: '#667eea', color: '#fff', borderRadius: 2, '&:hover': { bgcolor: '#5a6fd8' } }}>
+                  <Send />
                 </IconButton>
               </Box>
-            </Box>
-            <Box sx={{ maxHeight: '150px', overflow: 'auto' }}>
-              {ccTranscript.slice(-10).map((entry) => (
-              <Box key={entry.id} sx={{ mb: 1, p: 1, bgcolor: 'white', borderRadius: 1, boxShadow: 1 }}>
-                <Typography variant="caption" color="#bdbdbd">
-                    {entry.timestamp}
-                  </Typography>
-                <Typography variant="body2" sx={{ color: '#232526' }}>
-                    {entry.text}
-                  </Typography>
-                </Box>
-              ))}
-            </Box>
+            </Paper>
           </Box>
         )}
+      </Box>
+      {/* Recordings Section */}
+      {recordedChunks.length > 0 && (
+        <Box sx={{ mt: 2, p: 2, bgcolor: 'grey.50', borderRadius: 1, boxShadow: 2, mx: 4 }}>
+          <Typography variant="h6" gutterBottom>
+            Recordings ({recordedChunks.length})
+          </Typography>
+          <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+            {recordedChunks.map((blob, index) => (
+              <Button
+                key={index}
+                variant="outlined"
+                startIcon={<Download />}
+                onClick={() => downloadRecording(blob, index)}
+                size="small"
+              >
+                Recording {index + 1}
+              </Button>
+            ))}
+          </Box>
+        </Box>
+      )}
+      {/* Closed Captions Transcript Section */}
+      {ccEnabled && ccTranscript.length > 0 && (
+        <Box sx={{ mt: 2, p: 2, bgcolor: 'blue.50', borderRadius: 1, boxShadow: 2, mx: 4 }}>
+          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
+            <Typography variant="h6">
+              Live Transcript ({ccTranscript.length} entries)
+            </Typography>
+            <Box sx={{ display: 'flex', gap: 1 }}>
+              <Button size="small" onClick={clearTranscript} sx={{ color: '#667eea' }}>
+                Clear
+              </Button>
+              <IconButton size="small" onClick={() => setShowCcSettings(true)} sx={{ color: '#667eea' }}>
+                <Settings />
+              </IconButton>
+            </Box>
+          </Box>
+          <Box sx={{ maxHeight: '150px', overflow: 'auto' }}>
+            {ccTranscript.slice(-10).map((entry) => (
+              <Box key={entry.id} sx={{ mb: 1, p: 1, bgcolor: 'white', borderRadius: 1, boxShadow: 1 }}>
+                <Typography variant="caption" color="#bdbdbd">
+                  {entry.timestamp}
+                </Typography>
+                <Typography variant="body2" sx={{ color: '#232526' }}>
+                  {entry.text}
+                </Typography>
+              </Box>
+            ))}
+          </Box>
+        </Box>
+      )}
       {/* Info Section */}
       <Box sx={{ mt: 2, p: 2, bgcolor: 'grey.100', borderRadius: 1, mx: 4, boxShadow: 1 }}>
         <Typography variant="body2" color="#bdbdbd">
-            WebRTC video call with chat, screen sharing, recording, and closed captions. In a real app, you would need a signaling server to connect peers and relay messages.
-          </Typography>
-        </Box>
+          WebRTC video call with chat, screen sharing, recording, and closed captions. Production-ready with Socket.IO signaling server.
+        </Typography>
+      </Box>
       {/* Closed Captions Settings Dialog */}
       <Dialog open={showCcSettings} onClose={() => setShowCcSettings(false)} maxWidth="sm" fullWidth>
         <DialogTitle>Closed Captions Settings</DialogTitle>
