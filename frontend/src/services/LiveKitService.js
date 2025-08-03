@@ -1,4 +1,4 @@
-import { Room, RoomEvent, RemoteParticipant, LocalParticipant, DataPacket_Kind } from '@livekit/client';
+import { Room, RoomEvent, RemoteParticipant, LocalParticipant, DataPacket_Kind, Track } from 'livekit-client';
 
 class LiveKitService {
   constructor() {
@@ -14,9 +14,11 @@ class LiveKitService {
     this.onMessageCallback = null;
     this.onHandRaiseCallback = null;
     this.onRoomJoinedCallback = null;
+    this.onTrackMutedCallback = null;
+    this.onTrackUnmutedCallback = null;
   }
 
-  async connect(url = 'wss://livekit-server.example.com') {
+  async connect(url = 'wss://livekit-server.example.com', token = null) {
     try {
       this.room = new Room({
         adaptiveStream: true,
@@ -39,13 +41,32 @@ class LiveKitService {
       this.setupEventListeners();
       
       // Connect to the room
-      await this.room.connect(url, {
-        autoSubscribe: true,
-      });
+      if (token) {
+        await this.room.connect(url, token, {
+          autoSubscribe: true,
+        });
+      } else {
+        // For demo purposes, we'll use a mock connection
+        console.log('LiveKit: Mock connection for demo');
+        this.isConnected = true;
+        this.localParticipant = {
+          identity: 'Local User',
+          sid: 'local',
+          isLocal: true,
+          publishTrack: (track, options) => {
+            console.log('Publishing track:', track.kind, options);
+            return Promise.resolve();
+          },
+          publishData: (data, options) => {
+            console.log('Publishing data:', data);
+            return Promise.resolve();
+          },
+          setTrackEnabled: (track, enabled) => {
+            console.log('Setting track enabled:', track.kind, enabled);
+          }
+        };
+      }
 
-      this.isConnected = true;
-      this.localParticipant = this.room.localParticipant;
-      
       console.log('Connected to LiveKit room');
       return true;
     } catch (error) {
@@ -140,14 +161,35 @@ class LiveKitService {
         });
       }
     });
+
+    // Track muted/unmuted
+    this.room.on(RoomEvent.TrackMuted, (track, participant) => {
+      console.log('Track muted:', track.kind, 'from', participant.identity);
+      if (this.onTrackMutedCallback) {
+        this.onTrackMutedCallback(participant.sid, track.kind);
+      }
+    });
+
+    this.room.on(RoomEvent.TrackUnmuted, (track, participant) => {
+      console.log('Track unmuted:', track.kind, 'from', participant.identity);
+      if (this.onTrackUnmutedCallback) {
+        this.onTrackUnmutedCallback(participant.sid, track.kind);
+      }
+    });
   }
 
   async joinRoom(roomName, username, email) {
-    if (!this.room) {
+    if (!this.room && !this.localParticipant) {
       throw new Error('Not connected to LiveKit');
     }
 
     try {
+      if (this.localParticipant) {
+        // For demo purposes, simulate joining
+        console.log('Joined room:', roomName);
+        return true;
+      }
+
       // Set local participant metadata
       this.localParticipant.setMetadata(JSON.stringify({
         email: email,
@@ -196,10 +238,12 @@ class LiveKitService {
   async stopScreenShare() {
     if (!this.localParticipant) return;
 
-    const publications = this.localParticipant.getTrackPublications();
-    for (const pub of publications) {
-      if (pub.source === 'screen-share') {
-        await pub.unpublish();
+    if (this.room) {
+      const publications = this.localParticipant.getTrackPublications();
+      for (const pub of publications) {
+        if (pub.source === 'screen-share') {
+          await pub.unpublish();
+        }
       }
     }
   }
@@ -241,6 +285,10 @@ class LiveKitService {
       this.localParticipant = null;
       this.remoteParticipants.clear();
       this.isConnected = false;
+    } else {
+      // For demo purposes
+      this.isConnected = false;
+      this.localParticipant = null;
     }
   }
 
@@ -271,6 +319,14 @@ class LiveKitService {
 
   onRoomJoined(callback) {
     this.onRoomJoinedCallback = callback;
+  }
+
+  onTrackMuted(callback) {
+    this.onTrackMutedCallback = callback;
+  }
+
+  onTrackUnmuted(callback) {
+    this.onTrackUnmutedCallback = callback;
   }
 
   // Getters

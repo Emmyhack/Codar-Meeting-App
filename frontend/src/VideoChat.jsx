@@ -80,7 +80,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { useHotkeys } from 'react-hotkeys-hook';
 import { useToggle, useLocalStorage, useKey } from 'react-use';
 import { format } from 'date-fns';
-import WebRTCService from './services/WebRTCService';
+import LiveKitService from './services/LiveKitService';
 import PersonIcon from '@mui/icons-material/Person';
 
 const VideoChat = ({ open, onClose, roomName }) => {
@@ -129,7 +129,7 @@ const VideoChat = ({ open, onClose, roomName }) => {
   const mediaRecorderRef = useRef();
   const recordingTimerRef = useRef();
   const controlsTimeoutRef = useRef();
-  const webrtcServiceRef = useRef();
+  const livekitServiceRef = useRef();
   const dialogRef = useRef();
 
   // Hotkeys
@@ -208,18 +208,18 @@ const VideoChat = ({ open, onClose, roomName }) => {
     try {
       setConnectionStatus('Initializing...');
       
-      // Initialize WebRTC service
-      webrtcServiceRef.current = new WebRTCService();
+      // Initialize LiveKit service
+      livekitServiceRef.current = new LiveKitService();
       
       // Set up event handlers
-      webrtcServiceRef.current.onParticipantJoined((participant) => {
+      livekitServiceRef.current.onParticipantJoined((participant) => {
         setParticipants(prev => [...prev, participant]);
         setConnectionStatus('Connected');
         setIsConnected(true);
-        addNotification(`${participant.username} joined the meeting`, 'info');
+        addNotification(`${participant.name} joined the meeting`, 'info');
       });
 
-      webrtcServiceRef.current.onParticipantLeft((participantId) => {
+      livekitServiceRef.current.onParticipantLeft((participantId) => {
         setParticipants(prev => prev.filter(p => p.id !== participantId));
         setRemoteStreams(prev => {
           const newStreams = new Map(prev);
@@ -229,7 +229,7 @@ const VideoChat = ({ open, onClose, roomName }) => {
         addNotification('A participant left the meeting', 'info');
       });
 
-      webrtcServiceRef.current.onTrack((participantId, stream) => {
+      livekitServiceRef.current.onTrack((participantId, stream) => {
         setRemoteStreams(prev => {
           const newStreams = new Map(prev);
           newStreams.set(participantId, stream);
@@ -237,26 +237,38 @@ const VideoChat = ({ open, onClose, roomName }) => {
         });
       });
 
-      webrtcServiceRef.current.onMessage((message) => {
+      livekitServiceRef.current.onMessage((message) => {
         setMessages(prev => [...prev, message]);
       });
 
-      webrtcServiceRef.current.onRoomJoined((roomData) => {
+      livekitServiceRef.current.onHandRaise((participantId, raised) => {
+        setRaisedHands(prev => {
+          const newSet = new Set(prev);
+          if (raised) {
+            newSet.add(participantId);
+          } else {
+            newSet.delete(participantId);
+          }
+          return newSet;
+        });
+      });
+
+      livekitServiceRef.current.onRoomJoined((roomData) => {
         setParticipants(roomData.participants || []);
         setMessages(roomData.messages || []);
         setConnectionStatus('Connected');
         setIsConnected(true);
       });
 
-      // Connect to signaling server
-      await webrtcServiceRef.current.connect();
+      // Connect to LiveKit
+      await livekitServiceRef.current.connect();
       
       // Initialize media
       await initializeMedia();
       
       // Join room
       const roomId = roomName.replace(/\s+/g, '-').toLowerCase();
-      webrtcServiceRef.current.joinRoom(roomId, 'User', 'user@example.com');
+      await livekitServiceRef.current.joinRoom(roomId, 'User', 'user@example.com');
       
     } catch (error) {
       console.error('Error initializing meeting:', error);
@@ -285,8 +297,8 @@ const VideoChat = ({ open, onClose, roomName }) => {
         localVideoRef.current.srcObject = stream;
       }
       
-      if (webrtcServiceRef.current) {
-        webrtcServiceRef.current.setLocalStream(stream);
+      if (livekitServiceRef.current) {
+        livekitServiceRef.current.setLocalStream(stream);
       }
     } catch (error) {
       console.error('Error accessing media devices:', error);
@@ -298,9 +310,9 @@ const VideoChat = ({ open, onClose, roomName }) => {
     if (localStream) {
       localStream.getTracks().forEach(track => track.stop());
     }
-    if (webrtcServiceRef.current) {
-      webrtcServiceRef.current.leaveRoom();
-      webrtcServiceRef.current.disconnect();
+    if (livekitServiceRef.current) {
+      livekitServiceRef.current.leaveRoom();
+      livekitServiceRef.current.disconnect();
     }
     if (mediaRecorderRef.current && isRecording) {
       mediaRecorderRef.current.stop();
@@ -386,19 +398,21 @@ const VideoChat = ({ open, onClose, roomName }) => {
   };
 
   const toggleHandRaise = () => {
-    // Simulate hand raise for demo
-    const isRaised = raisedHands.has('local');
-    setRaisedHands(prev => {
-      const newSet = new Set(prev);
-      if (!isRaised) {
-        newSet.add('local');
-        addNotification('Hand raised', 'info');
-      } else {
-        newSet.delete('local');
-        addNotification('Hand lowered', 'info');
-      }
-      return newSet;
-    });
+    if (livekitServiceRef.current) {
+      const isRaised = raisedHands.has('local');
+      livekitServiceRef.current.toggleHandRaise(!isRaised);
+      setRaisedHands(prev => {
+        const newSet = new Set(prev);
+        if (!isRaised) {
+          newSet.add('local');
+          addNotification('Hand raised', 'info');
+        } else {
+          newSet.delete('local');
+          addNotification('Hand lowered', 'info');
+        }
+        return newSet;
+      });
+    }
   };
 
   const startRecording = async () => {
@@ -455,8 +469,8 @@ const VideoChat = ({ open, onClose, roomName }) => {
   };
 
   const sendMessage = () => {
-    if (newMessage.trim() && webrtcServiceRef.current) {
-      webrtcServiceRef.current.sendChatMessage(newMessage);
+    if (newMessage.trim() && livekitServiceRef.current) {
+      livekitServiceRef.current.sendChatMessage(newMessage);
       setNewMessage('');
     }
   };
@@ -739,7 +753,7 @@ const VideoChat = ({ open, onClose, roomName }) => {
                       <PersonIcon />
                     </Avatar>
                     <Typography variant="caption" sx={{ color: 'white' }}>
-                      {participant?.username || `Participant ${idx + 1}`}
+                      {participant?.name || `Participant ${idx + 1}`}
                     </Typography>
                     {hasRaisedHand && (
                       <HandRaise sx={{ color: '#ff9800', fontSize: 16 }} />
@@ -1062,7 +1076,7 @@ const VideoChat = ({ open, onClose, roomName }) => {
                     </Avatar>
                   </ListItemAvatar>
                   <ListItemText 
-                    primary={participant.username || `Participant ${idx + 1}`}
+                    primary={participant.name || `Participant ${idx + 1}`}
                     secondary={participant.email}
                   />
                   {raisedHands.has(participant.id) && (

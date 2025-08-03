@@ -35,6 +35,7 @@ export default defineConfig({
         manualChunks: {
           vendor: ['react', 'react-dom'],
           ui: ['@mui/material', '@mui/icons-material'],
+          livekit: ['livekit-client', '@livekit/components-react'],
         },
       },
     },
