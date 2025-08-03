@@ -10,13 +10,12 @@ export default defineConfig({
   },
   resolve: {
     alias: {
-      'simple-peer': 'simple-peer/simplepeer.min.js',
       buffer: 'buffer',
       process: 'process/browser',
     },
   },
   optimizeDeps: {
-    include: ['simple-peer', 'buffer', 'process'],
+    include: ['buffer', 'process'],
     force: false,
   },
   server: {
@@ -36,6 +35,7 @@ export default defineConfig({
         manualChunks: {
           vendor: ['react', 'react-dom'],
           ui: ['@mui/material', '@mui/icons-material'],
+          livekit: ['livekit-client', '@livekit/components-react'],
         },
       },
     },

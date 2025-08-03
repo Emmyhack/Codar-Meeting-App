@@ -1,10 +1,10 @@
 :root {
-  font-family: 'Inter', system-ui, Avenir, Helvetica, Arial, sans-serif;
+  font-family: 'Google Sans', 'Roboto', system-ui, Avenir, Helvetica, Arial, sans-serif;
   line-height: 1.5;
   font-weight: 400;
 
   color-scheme: light dark;
-  color: #213547;
+  color: #202124;
   background-color: #ffffff;
 
   font-synthesis: none;
@@ -19,11 +19,11 @@
 
 a {
   font-weight: 500;
-  color: #667eea;
+  color: #1a73e8;
   text-decoration: inherit;
 }
 a:hover {
-  color: #5a6fd8;
+  color: #1557b0;
 }
 
 body {
@@ -32,13 +32,15 @@ body {
   min-width: 320px;
   min-height: 100vh;
   width: 100%;
-  background-color: #f8fafc;
+  background-color: #f8f9fa;
+  font-family: 'Google Sans', 'Roboto', sans-serif;
 }
 
 h1 {
   font-size: 3.2em;
   line-height: 1.1;
   font-weight: 700;
+  font-family: 'Google Sans', 'Roboto', sans-serif;
 }
 
 button {
@@ -48,20 +50,38 @@ button {
   font-size: 1em;
   font-weight: 500;
   font-family: inherit;
-  background-color: #667eea;
+  background-color: #1a73e8;
   color: white;
   cursor: pointer;
   transition: all 0.25s ease;
+  font-family: 'Google Sans', 'Roboto', sans-serif;
 }
 button:hover {
-  background-color: #5a6fd8;
+  background-color: #1557b0;
   transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+  box-shadow: 0 4px 12px rgba(26, 115, 232, 0.3);
 }
 button:focus,
 button:focus-visible {
-  outline: 2px solid #667eea;
+  outline: 2px solid #1a73e8;
   outline-offset: 2px;
+}
+
+/* Google Meet specific colors */
+.google-blue {
+  color: #1a73e8;
+}
+
+.google-green {
+  color: #34a853;
+}
+
+.google-yellow {
+  color: #fbbc04;
+}
+
+.google-red {
+  color: #ea4335;
 }
 
 /* Custom scrollbar */
@@ -70,17 +90,17 @@ button:focus-visible {
 }
 
 ::-webkit-scrollbar-track {
-  background: #f1f1f1;
+  background: #f1f3f4;
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #c1c1c1;
+  background: #dadce0;
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #a8a8a8;
+  background: #bdc1c6;
 }
 
 /* Smooth transitions */
@@ -90,23 +110,195 @@ button:focus-visible {
 
 /* Focus styles for accessibility */
 *:focus {
-  outline: 2px solid #667eea;
+  outline: 2px solid #1a73e8;
   outline-offset: 2px;
+}
+
+/* Google Meet specific animations */
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+@keyframes slideIn {
+  from {
+    transform: translateY(20px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* Google Meet button styles */
+.google-button {
+  background: #1a73e8;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  padding: 12px 24px;
+  font-family: 'Google Sans', 'Roboto', sans-serif;
+  font-weight: 500;
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.google-button:hover {
+  background: #1557b0;
+  box-shadow: 0 2px 8px rgba(26, 115, 232, 0.3);
+}
+
+.google-button:active {
+  transform: translateY(1px);
+}
+
+/* Google Meet card styles */
+.google-card {
+  background: white;
+  border-radius: 12px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12), 0 1px 2px rgba(0, 0, 0, 0.24);
+  transition: box-shadow 0.3s ease;
+}
+
+.google-card:hover {
+  box-shadow: 0 3px 6px rgba(0, 0, 0, 0.16), 0 3px 6px rgba(0, 0, 0, 0.23);
 }
 
 /* Dark mode support */
 @media (prefers-color-scheme: dark) {
   :root {
     color: rgba(255, 255, 255, 0.87);
-    background-color: #242424;
+    background-color: #202124;
   }
   a:hover {
-    color: #747bff;
+    color: #8ab4f8;
   }
   button {
-    background-color: #1a1a1a;
+    background-color: #1a73e8;
   }
   body {
-    background-color: #1a1a1a;
+    background-color: #202124;
   }
+  
+  .google-card {
+    background: #303134;
+    color: white;
+  }
+}
+
+/* Google Meet typography */
+.google-sans {
+  font-family: 'Google Sans', 'Roboto', sans-serif;
+}
+
+.google-sans-display {
+  font-family: 'Google Sans Display', 'Google Sans', 'Roboto', sans-serif;
+}
+
+/* Responsive design */
+@media (max-width: 768px) {
+  body {
+    font-size: 14px;
+  }
+  
+  h1 {
+    font-size: 2.5em;
+  }
+  
+  button {
+    padding: 0.5em 1em;
+    font-size: 0.9em;
+  }
+}
+
+/* Google Meet specific utilities */
+.text-center {
+  text-align: center;
+}
+
+.text-left {
+  text-align: left;
+}
+
+.text-right {
+  text-align: right;
+}
+
+.flex {
+  display: flex;
+}
+
+.flex-col {
+  flex-direction: column;
+}
+
+.items-center {
+  align-items: center;
+}
+
+.justify-center {
+  justify-content: center;
+}
+
+.justify-between {
+  justify-content: space-between;
+}
+
+.gap-2 {
+  gap: 0.5rem;
+}
+
+.gap-4 {
+  gap: 1rem;
+}
+
+.p-4 {
+  padding: 1rem;
+}
+
+.p-6 {
+  padding: 1.5rem;
+}
+
+.m-4 {
+  margin: 1rem;
+}
+
+.mb-4 {
+  margin-bottom: 1rem;
+}
+
+.mt-4 {
+  margin-top: 1rem;
+}
+
+.rounded-lg {
+  border-radius: 0.5rem;
+}
+
+.rounded-xl {
+  border-radius: 0.75rem;
+}
+
+.shadow-lg {
+  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+}
+
+.shadow-xl {
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
 }
